@@ -45,64 +45,152 @@ const DEFAULT_TOPICS = [
   { id: "search-tickets", icon: "search", order: 1,
     title: "Search tickets", description: "Browse and filter Freshdesk tickets by month, agent, and reason.",
     slides: [
-      { id: "s1", title: "What it's for", bullets: ["Find tickets that need evaluating", "Filter by month, agent, or contact reason", "Already-evaluated tickets are flagged"] },
-      { id: "s2", title: "Walkthrough", bullets: ["Add the real steps here", "Click Edit content to replace this slide"] },
+      { id: "s1", title: "What it's for", bullets: ["- Find tickets that need evaluating", "- Filter by month, agent, or contact reason", "- Already-evaluated tickets are flagged"] },
+      { id: "s2", title: "Walkthrough", bullets: ["- Add the real steps here", "- Click Edit content to replace this slide"] },
     ],
     links: [], ticketLinks: [], tips: ["Add a practical tip for new hires here."], quiz: [] },
   { id: "ticket-evaluation", icon: "clipboardCheck", order: 2,
     title: "Ticket evaluation", description: "Evaluate a ticket with a decision tree — quality, root cause, and improvement ideas.",
     slides: [
-      { id: "s1", title: "How it works", bullets: ["Decision tree: how the ticket was resolved", "Quality and root cause are picked step by step", "Score is calculated automatically"] },
+      { id: "s1", title: "How it works", bullets: ["- Decision tree: how the ticket was resolved", "- Quality and root cause are picked step by step", "- Score is calculated automatically"] },
     ],
     links: [], ticketLinks: [], tips: ["Add a practical tip for new hires here."], quiz: [] },
   { id: "view-results", icon: "chart", order: 3,
     title: "View results", description: "Evaluations by quarter, team, and agent — scores, root causes, calibration flags.",
-    slides: [ { id: "s1", title: "What's in here", bullets: ["Filter by quarter, team, agent", "Score and trend overview", "Calibration flags"] } ],
+    slides: [ { id: "s1", title: "What's in here", bullets: ["- Filter by quarter, team, agent", "- Score and trend overview", "- Calibration flags"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "calibration-queue", icon: "target", order: 4,
     title: "Calibration queue", description: "Tickets flagged for calibration, waiting for a group review.",
-    slides: [ { id: "s1", title: "How calibration works", bullets: ["Tickets wait for a team discussion", "Mark them calibrated once discussed"] } ],
+    slides: [ { id: "s1", title: "How calibration works", bullets: ["- Tickets wait for a team discussion", "- Mark them calibrated once discussed"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "csat-report", icon: "smile", order: 5,
     title: "CSAT report", description: "Customer satisfaction stats, top agents, and detailed feedback by period.",
-    slides: [ { id: "s1", title: "Overview", bullets: ["CSAT stats by period", "Top agents", "Detailed feedback analysis"] } ],
+    slides: [ { id: "s1", title: "Overview", bullets: ["- CSAT stats by period", "- Top agents", "- Detailed feedback analysis"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "team-management", icon: "users", order: 6,
     title: "Team management", description: "Create and manage teams, add agents, organize the support structure.",
-    slides: [ { id: "s1", title: "What you manage here", bullets: ["Create and edit teams", "Add agents", "Support org structure"] } ],
+    slides: [ { id: "s1", title: "What you manage here", bullets: ["- Create and edit teams", "- Add agents", "- Support org structure"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "import-legacy", icon: "uploadCloud", order: 7,
     title: "Import legacy data", description: "Import evaluations from the old system by pasting Excel table data.",
-    slides: [ { id: "s1", title: "How to import", bullets: ["Paste data copied from Excel", "Review and confirm the import"] } ],
+    slides: [ { id: "s1", title: "How to import", bullets: ["- Paste data copied from Excel", "- Review and confirm the import"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "freshdesk-import", icon: "sync", order: 8,
     title: "Freshdesk import", description: "Import ticket data directly from Freshdesk exports for evaluation.",
-    slides: [ { id: "s1", title: "How it works", bullets: ["Upload a Freshdesk export", "Data gets prepped for evaluation"] } ],
+    slides: [ { id: "s1", title: "How it works", bullets: ["- Upload a Freshdesk export", "- Data gets prepped for evaluation"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "export-data", icon: "downloadCloud", order: 9,
     title: "Export data", description: "Export evaluated tickets to CSV, Excel, or JSON, with optional date filtering.",
-    slides: [ { id: "s1", title: "Export formats", bullets: ["CSV, Excel, JSON", "Optional date filtering"] } ],
+    slides: [ { id: "s1", title: "Export formats", bullets: ["- CSV, Excel, JSON", "- Optional date filtering"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "access-log", icon: "shieldCheck", order: 10,
     title: "Access log", description: "Login and logout activity, IP addresses, and unauthorized access attempts.",
-    slides: [ { id: "s1", title: "What to watch for", bullets: ["Login and logout history", "IP addresses", "Unauthorized access attempts"] } ],
+    slides: [ { id: "s1", title: "What to watch for", bullets: ["- Login and logout history", "- IP addresses", "- Unauthorized access attempts"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "changelog", icon: "history", order: 11,
     title: "Changelog", description: "Recent updates, bug fixes, and new features added to the system.",
-    slides: [ { id: "s1", title: "What it's for", bullets: ["History of system changes", "New features and fixes"] } ],
+    slides: [ { id: "s1", title: "What it's for", bullets: ["- History of system changes", "- New features and fixes"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "debug", icon: "wrench", order: 12,
     title: "Debug", description: "Inspect data paths, write permissions, JSON integrity, and record counts.",
-    slides: [ { id: "s1", title: "When to use it", bullets: ["Diagnose data issues", "Check permissions and file integrity"] } ],
+    slides: [ { id: "s1", title: "When to use it", bullets: ["- Diagnose data issues", "- Check permissions and file integrity"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
   { id: "migration", icon: "package", order: 13,
     title: "Migration", description: "One-shot: move old evaluations into the archive and set up the new store.",
-    slides: [ { id: "s1", title: "What it does", bullets: ["Moves old data into the archive", "Initializes the new evaluations store"] } ],
+    slides: [ { id: "s1", title: "What it does", bullets: ["- Moves old data into the archive", "- Initializes the new evaluations store"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
 ];
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
 const font = "'Inter', 'Graphik', -apple-system, 'Segoe UI', sans-serif";
+
+// ---------- Plain-text content renderer ----------
+// Turns an array of stored lines into paragraphs / bullet lists / numbered lists.
+// - A line starting with "- " or "* " joins (or starts) a bullet list.
+// - A line starting with "1. ", "2. ", etc. joins (or starts) a numbered list.
+// - Any other non-empty line is its own paragraph.
+// - Empty lines close the current list/paragraph and add spacing before the next block.
+// The underlying data (bullets / tips arrays) stays plain text — only the rendering changes.
+function parseContentLines(lines) {
+  const blocks = [];
+  let currentList = null; // { type: "ul" | "ol", items: [] }
+
+  const closeList = () => {
+    if (currentList) {
+      blocks.push(currentList);
+      currentList = null;
+    }
+  };
+
+  (lines || []).forEach((raw) => {
+    const line = (raw ?? "").trim();
+
+    if (line === "") {
+      closeList();
+      if (blocks.length > 0 && blocks[blocks.length - 1].type !== "space") {
+        blocks.push({ type: "space" });
+      }
+      return;
+    }
+
+    const bulletMatch = line.match(/^[-*]\s+(.*)$/);
+    const numberMatch = line.match(/^\d+\.\s+(.*)$/);
+
+    if (bulletMatch) {
+      if (!currentList || currentList.type !== "ul") {
+        closeList();
+        currentList = { type: "ul", items: [] };
+      }
+      currentList.items.push(bulletMatch[1]);
+    } else if (numberMatch) {
+      if (!currentList || currentList.type !== "ol") {
+        closeList();
+        currentList = { type: "ol", items: [] };
+      }
+      currentList.items.push(numberMatch[1]);
+    } else {
+      closeList();
+      blocks.push({ type: "p", text: line });
+    }
+  });
+  closeList();
+
+  // Trailing spacer blocks don't add anything visually — drop them.
+  while (blocks.length && blocks[blocks.length - 1].type === "space") blocks.pop();
+
+  return blocks;
+}
+
+function ContentBlocks({ lines, pStyle, listStyle, liStyle, spacing = 10 }) {
+  const blocks = parseContentLines(lines);
+  if (blocks.length === 0) return null;
+
+  return (
+    <>
+      {blocks.map((block, idx) => {
+        if (block.type === "p") {
+          return <p key={idx} style={{ margin: `0 0 ${spacing}px`, ...pStyle }}>{block.text}</p>;
+        }
+        if (block.type === "ul") {
+          return (
+            <ul key={idx} style={{ margin: `0 0 ${spacing}px`, paddingLeft: 20, ...listStyle }}>
+              {block.items.map((item, i) => <li key={i} style={liStyle}>{item}</li>)}
+            </ul>
+          );
+        }
+        if (block.type === "ol") {
+          return (
+            <ol key={idx} style={{ margin: `0 0 ${spacing}px`, paddingLeft: 20, ...listStyle }}>
+              {block.items.map((item, i) => <li key={i} style={liStyle}>{item}</li>)}
+            </ol>
+          );
+        }
+        // spacer between paragraphs/lists
+        return <div key={idx} style={{ height: spacing }} />;
+      })}
+    </>
+  );
+}
 
 // ---------- Supabase data helpers ----------
 
@@ -545,9 +633,13 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
               <div style={{ background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "28px 26px", minHeight: 180 }}>
                 <div style={{ fontSize: 11, color: BRAND.teal, marginBottom: 10, fontWeight: 500 }}>Slide {slideIdx + 1} of {topic.slides.length}</div>
                 <h3 style={{ margin: "0 0 14px", fontSize: 18, fontWeight: 700, color: BRAND.darkTeal }}>{slide.title}</h3>
-                <ul style={{ margin: 0, paddingLeft: 20, color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}>
-                  {slide.bullets.filter(Boolean).map((b, i) => <li key={i}>{b}</li>)}
-                </ul>
+                <div style={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}>
+                  <ContentBlocks
+                    lines={slide.bullets}
+                    pStyle={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}
+                    listStyle={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}
+                  />
+                </div>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
                 <button disabled={slideIdx === 0} onClick={() => setSlideIdx(i => Math.max(0, i - 1))} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "6px 12px", color: slideIdx === 0 ? "#B7BDC0" : BRAND.darkTeal, display: "flex", alignItems: "center", gap: 4, fontSize: 13 }}><ChevronLeft size={14} /> Previous</button>
@@ -586,9 +678,14 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
               {topic.tips.length > 0 && (
                 <div style={{ marginTop: 22, background: BRAND.limeSoft, borderRadius: 10, padding: "14px 16px" }}>
                   <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: BRAND.darkTeal, margin: "0 0 8px", fontWeight: 700 }}>Tips</h4>
-                  <ul style={{ margin: 0, paddingLeft: 18, color: BRAND.darkTeal, fontSize: 13.5, lineHeight: 1.7 }}>
-                    {topic.tips.map((t, i) => <li key={i}>{t}</li>)}
-                  </ul>
+                  <div style={{ color: BRAND.darkTeal, fontSize: 13.5, lineHeight: 1.7 }}>
+                    <ContentBlocks
+                      lines={topic.tips}
+                      pStyle={{ color: BRAND.darkTeal, fontSize: 13.5, lineHeight: 1.7 }}
+                      listStyle={{ color: BRAND.darkTeal, fontSize: 13.5, lineHeight: 1.7, paddingLeft: 18 }}
+                      spacing={8}
+                    />
+                  </div>
                 </div>
               )}
 
@@ -742,7 +839,7 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                     <input style={inputStyle} placeholder={"Slide " + (i + 1) + " title"} value={s.title} onChange={e => updateSlide(i, "title", e.target.value)} />
                     <button onClick={() => removeSlide(i)} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", color: "#C0392B" }}><Trash2 size={14} /></button>
                   </div>
-                  <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} placeholder="One bullet per line" value={s.bullets.join("\n")} onChange={e => updateSlide(i, "bullets", e.target.value.split("\n"))} />
+                  <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} placeholder={"One line per paragraph. Start a line with \"- \" for a bullet, or \"1. \" for a numbered list. Leave a line blank for spacing."} value={s.bullets.join("\n")} onChange={e => updateSlide(i, "bullets", e.target.value.split("\n"))} />
                 </div>
               ))}
               <button onClick={addSlide} className="onb-btn" style={{ background: "transparent", border: `1px dashed ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px", color: BRAND.teal, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
@@ -784,8 +881,8 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
           </div>
 
           <div>
-            <label style={labelStyle}>Tips, one per line</label>
-            <textarea style={{ ...inputStyle, minHeight: 60, resize: "vertical" }} value={draft.tips.join("\n")} onChange={e => update("tips", e.target.value.split("\n"))} />
+            <label style={labelStyle}>Tips</label>
+            <textarea style={{ ...inputStyle, minHeight: 60, resize: "vertical" }} placeholder={"One line per paragraph. Start a line with \"- \" for a bullet, or \"1. \" for a numbered list. Leave a line blank for spacing."} value={draft.tips.join("\n")} onChange={e => update("tips", e.target.value.split("\n"))} />
           </div>
 
           <div>
