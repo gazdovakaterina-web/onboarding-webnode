@@ -359,6 +359,71 @@ function FormattingToolbar({ value, onChange, getTextarea }) {
   );
 }
 
+// ---------- Global search ----------
+// Searches across everything the app stores for a topic: title, description, slide
+// titles/content, tips, links, related tickets, and quiz questions (+ their options).
+// Matching is a simple case-insensitive substring match — fast, predictable, and works
+// the same way whether the stored text is plain or uses the markdown syntax above.
+const SEARCH_FIELDS = [
+  { key: "title", label: "Title" },
+  { key: "description", label: "Description" },
+  { key: "slideTitle", label: "Slide titles" },
+  { key: "slideContent", label: "Slide content" },
+  { key: "tips", label: "Tips" },
+  { key: "links", label: "Links" },
+  { key: "tickets", label: "Related tickets" },
+  { key: "quiz", label: "Quiz questions" },
+];
+
+function getSearchableFieldText(topic, key) {
+  switch (key) {
+    case "title": return topic.title || "";
+    case "description": return topic.description || "";
+    case "slideTitle": return (topic.slides || []).map(s => s.title || "").join(" \n ");
+    case "slideContent": return (topic.slides || []).flatMap(s => s.bullets || []).join(" \n ");
+    case "tips": return (topic.tips || []).join(" \n ");
+    case "links": return (topic.links || []).map(l => `${l.label || ""} ${l.url || ""}`).join(" \n ");
+    case "tickets": return (topic.ticketLinks || []).map(l => `${l.label || ""} ${l.url || ""}`).join(" \n ");
+    case "quiz": return (topic.quiz || []).map(q => `${q.question || ""} ${(q.options || []).join(" ")}`).join(" \n ");
+    default: return "";
+  }
+}
+
+// Returns the list of matched field descriptors ({ key, label }) for a topic, or null
+// if the query doesn't match anywhere. `query` is expected to already be trimmed.
+function getTopicMatch(topic, query) {
+  if (!query) return null;
+  const q = query.toLowerCase();
+  const matched = SEARCH_FIELDS.filter(f => getSearchableFieldText(topic, f.key).toLowerCase().includes(q));
+  return matched.length > 0 ? matched : null;
+}
+
+// Splits `text` on (case-insensitive) occurrences of `query` and wraps matches in <mark>.
+// Pure substring matching — no regex special characters to worry about.
+function highlightText(text, query) {
+  if (!text) return text;
+  const q = (query || "").trim();
+  if (!q) return text;
+  const lowerText = text.toLowerCase();
+  const lowerQuery = q.toLowerCase();
+  const nodes = [];
+  let start = 0;
+  let idx = lowerText.indexOf(lowerQuery, start);
+  let i = 0;
+  while (idx !== -1) {
+    if (idx > start) nodes.push(text.slice(start, idx));
+    nodes.push(
+      <mark key={i++} style={{ background: BRAND.lime, color: BRAND.darkTeal, borderRadius: 2, padding: "0 1px" }}>
+        {text.slice(idx, idx + q.length)}
+      </mark>
+    );
+    start = idx + q.length;
+    idx = lowerText.indexOf(lowerQuery, start);
+  }
+  if (start < text.length) nodes.push(text.slice(start));
+  return nodes;
+}
+
 // ---------- Supabase data helpers ----------
 
 async function fetchTopics() {
@@ -518,6 +583,7 @@ function Hub({ session, profile }) {
   const [saving, setSaving] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [toast, setToast] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const toastTimer = useRef(null);
 
   useEffect(() => { loadAll(); }, []);
@@ -586,6 +652,8 @@ function Hub({ session, profile }) {
   const sorted = topics ? [...topics].sort((a, b) => a.order - b.order) : [];
   const totalDone = topics ? topics.filter(t => progress[t.id]).length : 0;
   const totalCount = topics ? topics.length : 0;
+  const trimmedQuery = searchQuery.trim();
+  const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery)) : sorted;
 
   function openTopic(id) { setActiveId(id); setSlideIdx(0); }
   function closeTopic() { setActiveId(null); setSlideIdx(0); }
@@ -645,6 +713,33 @@ function Hub({ session, profile }) {
           </p>
 
           {sorted.length > 0 && (
+            <div style={{ position: "relative", maxWidth: 420, margin: "24px auto 0" }}>
+              <Search size={15} color="rgba(255,255,255,0.55)" style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Search topics, slides, tips, links, quizzes…"
+                style={{
+                  width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.08)",
+                  border: "1px solid rgba(255,255,255,0.25)", borderRadius: 999, color: BRAND.white,
+                  padding: "10px 38px", fontSize: 13.5,
+                }}
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="onb-btn"
+                  title="Clear search"
+                  style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", color: "rgba(255,255,255,0.65)", display: "flex", alignItems: "center", padding: 4 }}
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+          )}
+
+          {sorted.length > 0 && (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 32, overflowX: "auto", padding: "8px 4px", justifyContent: "center" }}>
                 {sorted.map((t, i, arr) => (
@@ -688,12 +783,21 @@ function Hub({ session, profile }) {
             <p style={{ fontSize: 13 }}>Ask an editor to add the first topic.</p>
           )}
         </div>
+      ) : trimmedQuery && filtered.length === 0 ? (
+        <div style={{ maxWidth: 500, margin: "60px auto", textAlign: "center", color: BRAND.teal }}>
+          <p style={{ fontSize: 14, lineHeight: 1.6 }}>No topics match "{searchQuery}".</p>
+          <button onClick={() => setSearchQuery("")} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, color: BRAND.teal, borderRadius: 8, padding: "8px 16px", fontSize: 13 }}>
+            Clear search
+          </button>
+        </div>
       ) : (
         <div style={{ maxWidth: 1200, margin: "0 auto", padding: "32px 32px 8px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
-            {sorted.map(t => {
+            {filtered.map(t => {
               const Icon = ICONS[t.icon] || FileText;
               const done = !!progress[t.id];
+              const match = trimmedQuery ? getTopicMatch(t, trimmedQuery) : null;
+              const otherMatches = match ? match.filter(f => f.key !== "title" && f.key !== "description").map(f => f.label) : [];
               return (
                 <div key={t.id} className="onb-card" onClick={() => openTopic(t.id)} style={{ background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderTop: `3px solid ${BRAND.teal}`, borderRadius: 12, padding: "20px 20px 18px", position: "relative" }}>
                   {editMode && (
@@ -709,8 +813,13 @@ function Hub({ session, profile }) {
                   <div style={{ width: 40, height: 40, borderRadius: 10, background: BRAND.tealSoft, display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <Icon size={20} color={BRAND.teal} strokeWidth={1.8} />
                   </div>
-                  <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{t.title}</h3>
-                  <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{t.description}</p>
+                  <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{trimmedQuery ? highlightText(t.title, trimmedQuery) : t.title}</h3>
+                  <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{trimmedQuery ? highlightText(t.description, trimmedQuery) : t.description}</p>
+                  {otherMatches.length > 0 && (
+                    <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 6, padding: "3px 8px" }}>
+                      <Search size={11} /> Matches in {otherMatches.join(", ")}
+                    </div>
+                  )}
                   {t.quiz && t.quiz.length > 0 && (
                     <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.darkTeal, background: BRAND.limeSoft, borderRadius: 6, padding: "3px 8px", fontWeight: 700 }}>
                       <Zap size={11} /> Quiz
@@ -718,6 +827,7 @@ function Hub({ session, profile }) {
                   )}
                 </div>
               );
+
             })}
           </div>
         </div>
