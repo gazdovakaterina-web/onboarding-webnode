@@ -8,6 +8,7 @@ import {
   CreditCard, Book, HelpCircle, Globe, Calendar, AlertTriangle, Star, Zap,
   Database, FileSpreadsheet, Settings, Lock, ShieldCheck, Bell, MapPin,
   Award, Lightbulb, LogOut, Sparkles,
+  Bold, Italic, List, ListOrdered, Heading2, Image as ImageIcon, Link as LinkIcon,
 } from "lucide-react";
 
 const BRAND = {
@@ -105,12 +106,15 @@ function uid() { return Math.random().toString(36).slice(2, 9); }
 const font = "'Inter', 'Graphik', -apple-system, 'Segoe UI', sans-serif";
 
 // ---------- Plain-text content renderer ----------
-// Turns an array of stored lines into paragraphs / bullet lists / numbered lists.
+// Turns an array of stored lines into paragraphs / headings / bullet lists / numbered lists.
+// - A line starting with "#", "##", or "###" (followed by a space) becomes a heading.
 // - A line starting with "- " or "* " joins (or starts) a bullet list.
 // - A line starting with "1. ", "2. ", etc. joins (or starts) a numbered list.
 // - Any other non-empty line is its own paragraph.
 // - Empty lines close the current list/paragraph and add spacing before the next block.
-// The underlying data (bullets / tips arrays) stays plain text — only the rendering changes.
+// Inline markdown (bold, italic, code, links, autolinks, images) is parsed separately by
+// renderInline() at render time — the underlying data (bullets / tips arrays) stays plain
+// text; only the rendering changes. No HTML is ever parsed or injected (no dangerouslySetInnerHTML).
 function parseContentLines(lines) {
   const blocks = [];
   let currentList = null; // { type: "ul" | "ol", items: [] }
@@ -133,10 +137,14 @@ function parseContentLines(lines) {
       return;
     }
 
+    const headingMatch = line.match(/^(#{1,3})\s+(.*)$/);
     const bulletMatch = line.match(/^[-*]\s+(.*)$/);
     const numberMatch = line.match(/^\d+\.\s+(.*)$/);
 
-    if (bulletMatch) {
+    if (headingMatch) {
+      closeList();
+      blocks.push({ type: "h" + headingMatch[1].length, text: headingMatch[2] });
+    } else if (bulletMatch) {
       if (!currentList || currentList.type !== "ul") {
         closeList();
         currentList = { type: "ul", items: [] };
@@ -161,27 +169,98 @@ function parseContentLines(lines) {
   return blocks;
 }
 
-function ContentBlocks({ lines, pStyle, listStyle, liStyle, spacing = 10 }) {
+// Matches, in priority order: images, links, bold, italic, inline code, and bare autolinks.
+// Named groups let us tell which alternative matched without juggling numeric indices.
+const INLINE_MD_RE =
+  /(?<img>!\[(?<imgAlt>[^\]]*)\]\((?<imgUrl>[^\s)]+)\))|(?<link>\[(?<linkLabel>[^\]]*)\]\((?<linkUrl>[^\s)]+)\))|(?<bold>\*\*(?<boldText>[^*]+)\*\*)|(?<italic>\*(?<italicText>[^*]+)\*)|(?<code>`(?<codeText>[^`]+)`)|(?<autolink>https?:\/\/[^\s<>"')\]]+)/g;
+
+// Parses a single line of plain text into safe React nodes — never HTML.
+// Supports **bold**, *italic*, `code`, [label](url), bare https:// URLs, and ![alt](url) images.
+function renderInline(text, keyBase, linkColor) {
+  const nodes = [];
+  let lastIndex = 0;
+  let match;
+  let i = 0;
+  INLINE_MD_RE.lastIndex = 0;
+
+  while ((match = INLINE_MD_RE.exec(text)) !== null) {
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+    const g = match.groups;
+    const key = `${keyBase}-${i++}`;
+
+    if (g.img) {
+      nodes.push(
+        <a key={key} href={g.imgUrl} target="_blank" rel="noreferrer">
+          <img
+            src={g.imgUrl}
+            alt={g.imgAlt}
+            style={{ maxWidth: "100%", height: "auto", borderRadius: 10, display: "block" }}
+          />
+        </a>
+      );
+    } else if (g.link) {
+      nodes.push(
+        <a key={key} href={g.linkUrl} target="_blank" rel="noreferrer" style={{ color: linkColor, textDecoration: "underline" }}>
+          {g.linkLabel}
+        </a>
+      );
+    } else if (g.bold) {
+      nodes.push(<strong key={key}>{g.boldText}</strong>);
+    } else if (g.italic) {
+      nodes.push(<em key={key}>{g.italicText}</em>);
+    } else if (g.code) {
+      nodes.push(
+        <code key={key} style={{ background: BRAND.tealSoft, padding: "1px 5px", borderRadius: 4, fontSize: "0.9em", fontFamily: "ui-monospace, Menlo, monospace" }}>
+          {g.codeText}
+        </code>
+      );
+    } else if (g.autolink) {
+      nodes.push(
+        <a key={key} href={match[0]} target="_blank" rel="noreferrer" style={{ color: linkColor, textDecoration: "underline" }}>
+          {match[0]}
+        </a>
+      );
+    }
+
+    lastIndex = match.index + match[0].length;
+    if (match[0].length === 0) INLINE_MD_RE.lastIndex += 1; // guard against zero-length matches
+  }
+
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+const HEADING_SIZE = { h1: 1.35, h2: 1.15, h3: 1.0 };
+
+function ContentBlocks({ lines, pStyle, listStyle, liStyle, spacing = 10, linkColor = BRAND.teal }) {
   const blocks = parseContentLines(lines);
   if (blocks.length === 0) return null;
+  const baseSize = parseFloat(pStyle?.fontSize) || 14.5;
 
   return (
     <>
       {blocks.map((block, idx) => {
         if (block.type === "p") {
-          return <p key={idx} style={{ margin: `0 0 ${spacing}px`, ...pStyle }}>{block.text}</p>;
+          return <p key={idx} style={{ margin: `0 0 ${spacing}px`, ...pStyle }}>{renderInline(block.text, "p" + idx, linkColor)}</p>;
+        }
+        if (block.type === "h1" || block.type === "h2" || block.type === "h3") {
+          return (
+            <p key={idx} style={{ margin: `0 0 ${spacing}px`, ...pStyle, fontSize: baseSize * HEADING_SIZE[block.type], fontWeight: 700 }}>
+              {renderInline(block.text, block.type + idx, linkColor)}
+            </p>
+          );
         }
         if (block.type === "ul") {
           return (
             <ul key={idx} style={{ margin: `0 0 ${spacing}px`, paddingLeft: 20, ...listStyle }}>
-              {block.items.map((item, i) => <li key={i} style={liStyle}>{item}</li>)}
+              {block.items.map((item, i) => <li key={i} style={liStyle}>{renderInline(item, "ul" + idx + "-" + i, linkColor)}</li>)}
             </ul>
           );
         }
         if (block.type === "ol") {
           return (
             <ol key={idx} style={{ margin: `0 0 ${spacing}px`, paddingLeft: 20, ...listStyle }}>
-              {block.items.map((item, i) => <li key={i} style={liStyle}>{item}</li>)}
+              {block.items.map((item, i) => <li key={i} style={liStyle}>{renderInline(item, "ol" + idx + "-" + i, linkColor)}</li>)}
             </ol>
           );
         }
@@ -189,6 +268,94 @@ function ContentBlocks({ lines, pStyle, listStyle, liStyle, spacing = 10 }) {
         return <div key={idx} style={{ height: spacing }} />;
       })}
     </>
+  );
+}
+
+// ---------- Editor formatting toolbar ----------
+// Operates directly on the plain-text string (same one stored as a newline-joined
+// line array). Every action edits the raw text and hands the result back through
+// onChange — nothing here changes how/where the content is persisted.
+function FormattingToolbar({ value, onChange, getTextarea }) {
+  const getSelection = () => {
+    const el = getTextarea();
+    if (!el) return { start: value.length, end: value.length };
+    return { start: el.selectionStart ?? value.length, end: el.selectionEnd ?? value.length };
+  };
+
+  const focusAndSelect = (start, end) => {
+    requestAnimationFrame(() => {
+      const el = getTextarea();
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(start, end);
+    });
+  };
+
+  // Wraps the current selection with `before`/`after` (e.g. ** / **). Falls back to a
+  // placeholder word when nothing is selected, so the button always does something useful.
+  const wrapSelection = (before, after, placeholder) => {
+    const { start, end } = getSelection();
+    const selected = value.slice(start, end) || placeholder;
+    const next = value.slice(0, start) + before + selected + after + value.slice(end);
+    onChange(next);
+    focusAndSelect(start + before.length, start + before.length + selected.length);
+  };
+
+  // Applies `mapLine(line, lineIndex)` to every line touched by the current selection
+  // (or just the current line, if nothing is selected).
+  const applyToLines = (mapLine) => {
+    const { start, end } = getSelection();
+    const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+    let lineEnd = value.indexOf("\n", end);
+    if (lineEnd === -1) lineEnd = value.length;
+    const segment = value.slice(lineStart, lineEnd);
+    const newSegment = segment.split("\n").map(mapLine).join("\n");
+    const next = value.slice(0, lineStart) + newSegment + value.slice(lineEnd);
+    onChange(next);
+    focusAndSelect(lineStart, lineStart + newSegment.length);
+  };
+
+  const insertAtCursor = (before, after, placeholder, selectPlaceholder) => {
+    const { start, end } = getSelection();
+    const label = value.slice(start, end) || placeholder;
+    const snippet = before + label + after;
+    const next = value.slice(0, start) + snippet + value.slice(end);
+    onChange(next);
+    if (selectPlaceholder) {
+      const selStart = start + before.length;
+      focusAndSelect(selStart, selStart + label.length);
+    } else {
+      focusAndSelect(start + snippet.length, start + snippet.length);
+    }
+  };
+
+  const makeBold = () => wrapSelection("**", "**", "bold text");
+  const makeItalic = () => wrapSelection("*", "*", "italic text");
+  const makeHeading = () => applyToLines((line, i) => (i === 0 ? (/^#{1,3}\s/.test(line) ? line : "## " + line) : line));
+  const makeBulletList = () => applyToLines((line) => (line.trim() === "" ? line : (/^[-*]\s/.test(line) ? line : "- " + line)));
+  const makeNumberedList = () => {
+    let n = 1;
+    applyToLines((line) => {
+      if (line.trim() === "") return line;
+      const stripped = line.replace(/^\d+\.\s+/, "");
+      return `${n++}. ${stripped}`;
+    });
+  };
+  const insertLink = () => insertAtCursor("[", "](https://example.com)", "label", true);
+  const insertImage = () => insertAtCursor("![", "](https://example.com/image.png)", "description", true);
+
+  const btnStyle = { background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: "5px 7px", color: BRAND.teal, display: "flex", alignItems: "center", justifyContent: "center" };
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
+      <button type="button" onClick={makeBold} className="onb-btn" style={btnStyle} title="Bold"><Bold size={13} /></button>
+      <button type="button" onClick={makeItalic} className="onb-btn" style={btnStyle} title="Italic"><Italic size={13} /></button>
+      <button type="button" onClick={makeHeading} className="onb-btn" style={btnStyle} title="Heading"><Heading2 size={13} /></button>
+      <button type="button" onClick={makeBulletList} className="onb-btn" style={btnStyle} title="Bullet list"><List size={13} /></button>
+      <button type="button" onClick={makeNumberedList} className="onb-btn" style={btnStyle} title="Numbered list"><ListOrdered size={13} /></button>
+      <button type="button" onClick={insertLink} className="onb-btn" style={btnStyle} title="Link"><LinkIcon size={13} /></button>
+      <button type="button" onClick={insertImage} className="onb-btn" style={btnStyle} title="Image"><ImageIcon size={13} /></button>
+    </div>
   );
 }
 
@@ -762,6 +929,8 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
 // ---------- Edit modal ----------
 
 function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
+  const slideTextareaRefs = useRef({});
+  const tipsTextareaRef = useRef(null);
   function update(field, value) { setDraft(d => ({ ...d, [field]: value })); }
   function updateSlide(i, field, value) { update("slides", draft.slides.map((s, idx) => idx === i ? { ...s, [field]: value } : s)); }
   function addSlide() { update("slides", [...draft.slides, { id: uid(), title: "", bullets: [""] }]); }
@@ -839,7 +1008,18 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                     <input style={inputStyle} placeholder={"Slide " + (i + 1) + " title"} value={s.title} onChange={e => updateSlide(i, "title", e.target.value)} />
                     <button onClick={() => removeSlide(i)} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", color: "#C0392B" }}><Trash2 size={14} /></button>
                   </div>
-                  <textarea style={{ ...inputStyle, minHeight: 70, resize: "vertical" }} placeholder={"One line per paragraph. Start a line with \"- \" for a bullet, or \"1. \" for a numbered list. Leave a line blank for spacing."} value={s.bullets.join("\n")} onChange={e => updateSlide(i, "bullets", e.target.value.split("\n"))} />
+                  <FormattingToolbar
+                    value={s.bullets.join("\n")}
+                    onChange={newValue => updateSlide(i, "bullets", newValue.split("\n"))}
+                    getTextarea={() => slideTextareaRefs.current[s.id]}
+                  />
+                  <textarea
+                    ref={el => { slideTextareaRefs.current[s.id] = el; }}
+                    style={{ ...inputStyle, minHeight: 70, resize: "vertical" }}
+                    placeholder={"One line per paragraph. Start a line with \"- \" for a bullet, or \"1. \" for a numbered list. Leave a line blank for spacing. Supports **bold**, *italic*, `code`, # headings, and [links](https://...)."}
+                    value={s.bullets.join("\n")}
+                    onChange={e => updateSlide(i, "bullets", e.target.value.split("\n"))}
+                  />
                 </div>
               ))}
               <button onClick={addSlide} className="onb-btn" style={{ background: "transparent", border: `1px dashed ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px", color: BRAND.teal, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
@@ -882,7 +1062,18 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
 
           <div>
             <label style={labelStyle}>Tips</label>
-            <textarea style={{ ...inputStyle, minHeight: 60, resize: "vertical" }} placeholder={"One line per paragraph. Start a line with \"- \" for a bullet, or \"1. \" for a numbered list. Leave a line blank for spacing."} value={draft.tips.join("\n")} onChange={e => update("tips", e.target.value.split("\n"))} />
+            <FormattingToolbar
+              value={draft.tips.join("\n")}
+              onChange={newValue => update("tips", newValue.split("\n"))}
+              getTextarea={() => tipsTextareaRef.current}
+            />
+            <textarea
+              ref={tipsTextareaRef}
+              style={{ ...inputStyle, minHeight: 60, resize: "vertical" }}
+              placeholder={"One line per paragraph. Start a line with \"- \" for a bullet, or \"1. \" for a numbered list. Leave a line blank for spacing. Supports **bold**, *italic*, `code`, # headings, and [links](https://...)."}
+              value={draft.tips.join("\n")}
+              onChange={e => update("tips", e.target.value.split("\n"))}
+            />
           </div>
 
           <div>
