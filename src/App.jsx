@@ -8,7 +8,7 @@ import {
   CreditCard, Book, HelpCircle, Globe, Calendar, AlertTriangle, Star, Zap,
   Database, FileSpreadsheet, Settings, Lock, ShieldCheck, Bell, MapPin,
   Award, Lightbulb, LogOut, Sparkles,
-  Bold, Italic, List, ListOrdered, Heading2, Image as ImageIcon, Link as LinkIcon,
+  Bold, Italic, List, ListOrdered, Heading2, Image as ImageIcon, Link as LinkIcon, Clock,
 } from "lucide-react";
 
 const BRAND = {
@@ -43,60 +43,60 @@ const ICON_PICKER_ORDER = [
 ];
 
 const DEFAULT_TOPICS = [
-  { id: "search-tickets", icon: "search", order: 1,
+  { id: "search-tickets", estimatedTime: 6, icon: "search", order: 1,
     title: "Search tickets", description: "Browse and filter Freshdesk tickets by month, agent, and reason.",
     slides: [
       { id: "s1", title: "What it's for", bullets: ["- Find tickets that need evaluating", "- Filter by month, agent, or contact reason", "- Already-evaluated tickets are flagged"] },
       { id: "s2", title: "Walkthrough", bullets: ["- Add the real steps here", "- Click Edit content to replace this slide"] },
     ],
     links: [], ticketLinks: [], tips: ["Add a practical tip for new hires here."], quiz: [] },
-  { id: "ticket-evaluation", icon: "clipboardCheck", order: 2,
+  { id: "ticket-evaluation", estimatedTime: 8, icon: "clipboardCheck", order: 2,
     title: "Ticket evaluation", description: "Evaluate a ticket with a decision tree — quality, root cause, and improvement ideas.",
     slides: [
       { id: "s1", title: "How it works", bullets: ["- Decision tree: how the ticket was resolved", "- Quality and root cause are picked step by step", "- Score is calculated automatically"] },
     ],
     links: [], ticketLinks: [], tips: ["Add a practical tip for new hires here."], quiz: [] },
-  { id: "view-results", icon: "chart", order: 3,
+  { id: "view-results", estimatedTime: 6, icon: "chart", order: 3,
     title: "View results", description: "Evaluations by quarter, team, and agent — scores, root causes, calibration flags.",
     slides: [ { id: "s1", title: "What's in here", bullets: ["- Filter by quarter, team, agent", "- Score and trend overview", "- Calibration flags"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "calibration-queue", icon: "target", order: 4,
+  { id: "calibration-queue", estimatedTime: 5, icon: "target", order: 4,
     title: "Calibration queue", description: "Tickets flagged for calibration, waiting for a group review.",
     slides: [ { id: "s1", title: "How calibration works", bullets: ["- Tickets wait for a team discussion", "- Mark them calibrated once discussed"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "csat-report", icon: "smile", order: 5,
+  { id: "csat-report", estimatedTime: 6, icon: "smile", order: 5,
     title: "CSAT report", description: "Customer satisfaction stats, top agents, and detailed feedback by period.",
     slides: [ { id: "s1", title: "Overview", bullets: ["- CSAT stats by period", "- Top agents", "- Detailed feedback analysis"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "team-management", icon: "users", order: 6,
+  { id: "team-management", estimatedTime: 7, icon: "users", order: 6,
     title: "Team management", description: "Create and manage teams, add agents, organize the support structure.",
     slides: [ { id: "s1", title: "What you manage here", bullets: ["- Create and edit teams", "- Add agents", "- Support org structure"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "import-legacy", icon: "uploadCloud", order: 7,
+  { id: "import-legacy", estimatedTime: 8, icon: "uploadCloud", order: 7,
     title: "Import legacy data", description: "Import evaluations from the old system by pasting Excel table data.",
     slides: [ { id: "s1", title: "How to import", bullets: ["- Paste data copied from Excel", "- Review and confirm the import"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "freshdesk-import", icon: "sync", order: 8,
+  { id: "freshdesk-import", estimatedTime: 7, icon: "sync", order: 8,
     title: "Freshdesk import", description: "Import ticket data directly from Freshdesk exports for evaluation.",
     slides: [ { id: "s1", title: "How it works", bullets: ["- Upload a Freshdesk export", "- Data gets prepped for evaluation"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "export-data", icon: "downloadCloud", order: 9,
+  { id: "export-data", estimatedTime: 5, icon: "downloadCloud", order: 9,
     title: "Export data", description: "Export evaluated tickets to CSV, Excel, or JSON, with optional date filtering.",
     slides: [ { id: "s1", title: "Export formats", bullets: ["- CSV, Excel, JSON", "- Optional date filtering"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "access-log", icon: "shieldCheck", order: 10,
+  { id: "access-log", estimatedTime: 5, icon: "shieldCheck", order: 10,
     title: "Access log", description: "Login and logout activity, IP addresses, and unauthorized access attempts.",
     slides: [ { id: "s1", title: "What to watch for", bullets: ["- Login and logout history", "- IP addresses", "- Unauthorized access attempts"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "changelog", icon: "history", order: 11,
+  { id: "changelog", estimatedTime: 4, icon: "history", order: 11,
     title: "Changelog", description: "Recent updates, bug fixes, and new features added to the system.",
     slides: [ { id: "s1", title: "What it's for", bullets: ["- History of system changes", "- New features and fixes"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "debug", icon: "wrench", order: 12,
+  { id: "debug", estimatedTime: 6, icon: "wrench", order: 12,
     title: "Debug", description: "Inspect data paths, write permissions, JSON integrity, and record counts.",
     slides: [ { id: "s1", title: "When to use it", bullets: ["- Diagnose data issues", "- Check permissions and file integrity"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "migration", icon: "package", order: 13,
+  { id: "migration", estimatedTime: 9, icon: "package", order: 13,
     title: "Migration", description: "One-shot: move old evaluations into the archive and set up the new store.",
     slides: [ { id: "s1", title: "What it does", bullets: ["- Moves old data into the archive", "- Initializes the new evaluations store"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
@@ -424,6 +424,26 @@ function highlightText(text, query) {
   return nodes;
 }
 
+// ---------- Estimated learning time ----------
+// Stored as a plain integer (minutes) inside each topic's jsonb `data`, alongside
+// title/description/slides/etc — no schema change needed. Topics saved before this
+// feature existed simply don't have the field, so we default those to 5 minutes.
+const DEFAULT_ESTIMATED_MINUTES = 5;
+
+function getEstimatedTime(topic) {
+  const val = topic?.estimatedTime;
+  return Number.isFinite(val) && val > 0 ? Math.round(val) : DEFAULT_ESTIMATED_MINUTES;
+}
+
+// under 60 min -> "45 min"; 60 min or more -> "2h 15m" (or "2h" on an exact hour)
+function formatMinutes(totalMinutes) {
+  const mins = Math.max(0, Math.round(totalMinutes));
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 // ---------- Supabase data helpers ----------
 
 async function fetchTopics() {
@@ -652,6 +672,7 @@ function Hub({ session, profile }) {
   const sorted = topics ? [...topics].sort((a, b) => a.order - b.order) : [];
   const totalDone = topics ? topics.filter(t => progress[t.id]).length : 0;
   const totalCount = topics ? topics.length : 0;
+  const remainingMinutes = topics ? topics.filter(t => !progress[t.id]).reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const trimmedQuery = searchQuery.trim();
   const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery)) : sorted;
 
@@ -661,7 +682,7 @@ function Hub({ session, profile }) {
   function startNewTopic() {
     setEditDraft({
       id: "topic-" + uid(), icon: "file",
-      order: (topics?.length || 0) + 1, title: "", description: "",
+      order: (topics?.length || 0) + 1, title: "", description: "", estimatedTime: DEFAULT_ESTIMATED_MINUTES,
       slides: [{ id: uid(), title: "", bullets: [""] }], links: [], ticketLinks: [], tips: [], quiz: [],
     });
   }
@@ -750,6 +771,12 @@ function Hub({ session, profile }) {
                 ))}
               </div>
               <p style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", marginTop: 12 }}>{totalDone} of {totalCount} topics complete</p>
+              <div style={{ marginTop: 6, fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
+                Remaining learning time
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 4, fontSize: 15, fontWeight: 700, color: BRAND.lime }}>
+                  <Clock size={14} /> {formatMinutes(remainingMinutes)}
+                </div>
+              </div>
             </>
           )}
 
@@ -815,6 +842,9 @@ function Hub({ session, profile }) {
                   </div>
                   <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{trimmedQuery ? highlightText(t.title, trimmedQuery) : t.title}</h3>
                   <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{trimmedQuery ? highlightText(t.description, trimmedQuery) : t.description}</p>
+                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal }}>
+                    <Clock size={12} /> {formatMinutes(getEstimatedTime(t))}
+                  </div>
                   {otherMatches.length > 0 && (
                     <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 6, padding: "3px 8px" }}>
                       <Search size={11} /> Matches in {otherMatches.join(", ")}
@@ -894,7 +924,12 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
         <div style={{ padding: "20px 24px", borderBottom: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <div style={{ fontSize: 12, color: BRAND.teal, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6, fontWeight: 700 }}>Topic {String(topic.order).padStart(2, "0")}</div>
-            <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: BRAND.darkTeal }}>{topic.title}</h2>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: BRAND.darkTeal }}>{topic.title}</h2>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 999, padding: "3px 10px" }}>
+                <Clock size={12} /> {formatMinutes(getEstimatedTime(topic))}
+              </span>
+            </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {editMode && (
@@ -1106,6 +1141,16 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
             <div style={{ width: 90 }}>
               <label style={labelStyle}>Order</label>
               <input type="number" style={inputStyle} value={draft.order} onChange={e => update("order", Number(e.target.value))} />
+            </div>
+            <div style={{ width: 140 }}>
+              <label style={labelStyle}>Est. time (min)</label>
+              <input
+                type="number"
+                min="1"
+                style={inputStyle}
+                value={draft.estimatedTime ?? DEFAULT_ESTIMATED_MINUTES}
+                onChange={e => update("estimatedTime", Math.max(1, Number(e.target.value) || DEFAULT_ESTIMATED_MINUTES))}
+              />
             </div>
           </div>
 
