@@ -34,6 +34,43 @@ const ICONS = {
   mapPin: MapPin, award: Award, lightbulb: Lightbulb,
 };
 
+// Not used yet — topics don't have a `category` field today. This is here so that once
+// one is added (e.g. "product", "domains", "billing", "email", "seo", "gettingStarted"),
+// topics without an explicit `icon` can automatically fall back to a sensible
+// category-appropriate icon instead of the generic FileText default.
+const CATEGORY_ICONS = {
+  product: Package,
+  domains: Globe,
+  billing: CreditCard,
+  email: Mail,
+  seo: BarChart3,
+  gettingStarted: Star,
+};
+
+// Central place that decides which icon a topic's card/header shows. Resolution order:
+// 1. an explicit per-topic `icon` key (today's only source — unchanged behavior)
+// 2. a `category`-based default (future: once topics gain a `category` field)
+// 3. FileText as a last-resort fallback
+// Keeping this logic in one function means adding real categorization later is a data
+// change plus a one-line lookup, not a rewrite of every place an icon is rendered.
+function getTopicIconComponent(topic) {
+  if (topic?.icon && ICONS[topic.icon]) return ICONS[topic.icon];
+  if (topic?.category && CATEGORY_ICONS[topic.category]) return CATEGORY_ICONS[topic.category];
+  return FileText;
+}
+
+// Small rounded icon badge used on topic cards (and reusable anywhere else a topic's
+// icon needs to render). Size/colors are configurable so it can be reused at other
+// scales later without duplicating the lookup logic above.
+function TopicIcon({ topic, size = 20, boxSize = 40, color = BRAND.teal, background = BRAND.tealSoft }) {
+  const Icon = getTopicIconComponent(topic);
+  return (
+    <div style={{ width: boxSize, height: boxSize, borderRadius: 10, background, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <Icon size={size} color={color} strokeWidth={1.8} />
+    </div>
+  );
+}
+
 const ICON_PICKER_ORDER = [
   "search", "clipboardCheck", "chart", "target", "smile", "users", "mail",
   "messageSquare", "phone", "uploadCloud", "downloadCloud", "sync", "database",
@@ -894,17 +931,8 @@ function Hub({ session, profile }) {
 
           {sorted.length > 0 && (
             <>
-              <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 26, overflowX: "auto", padding: "8px 4px", justifyContent: "center" }}>
-                {sorted.map((t, i, arr) => (
-                  <div key={t.id} style={{ display: "flex", alignItems: "center", flex: "0 0 auto" }}>
-                    <button onClick={() => openTopic(t.id)} title={t.title} className="onb-btn" style={{ width: 13, height: 13, borderRadius: "50%", border: "none", background: progress[t.id] ? BRAND.lime : "rgba(255,255,255,0.25)", boxShadow: progress[t.id] ? "0 0 0 4px rgba(183,239,135,0.25)" : "none" }} />
-                    {i < arr.length - 1 && <div style={{ width: 24, height: 2, background: "rgba(255,255,255,0.2)" }} />}
-                  </div>
-                ))}
-              </div>
-
               {/* Summary stats — computed live from topic data */}
-              <div style={{ display: "flex", gap: 10, marginTop: 22, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 10, marginTop: 30, flexWrap: "wrap" }}>
                 {[
                   { icon: FileText, value: totalCount, label: totalCount === 1 ? "Topic" : "Topics" },
                   { icon: Zap, value: totalQuizzes, label: totalQuizzes === 1 ? "Quiz" : "Quizzes" },
@@ -919,7 +947,7 @@ function Hub({ session, profile }) {
               </div>
 
               {/* Progress summary — compact cards replacing the old plain-text lines */}
-              <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
                 <div style={{ flex: "1 1 180px", minWidth: 170, background: "rgba(183,239,135,0.1)", border: "1px solid rgba(183,239,135,0.3)", borderRadius: 12, padding: "12px 14px", textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ width: 30, height: 30, borderRadius: "50%", background: BRAND.lime, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     <Check size={15} color={BRAND.darkTeal} />
@@ -989,7 +1017,6 @@ function Hub({ session, profile }) {
         <div style={{ maxWidth: 1200, margin: "0 auto", padding: "32px 32px 8px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
             {filtered.map(t => {
-              const Icon = ICONS[t.icon] || FileText;
               const done = !!progress[t.id];
               const match = trimmedQuery ? getTopicMatch(t, trimmedQuery, notesByTopicId) : null;
               const otherMatches = match ? match.filter(f => f.key !== "title" && f.key !== "description").map(f => f.label) : [];
@@ -1006,9 +1033,7 @@ function Hub({ session, profile }) {
                       <Check size={13} color={BRAND.darkTeal} />
                     </div>
                   )}
-                  <div style={{ width: 40, height: 40, borderRadius: 10, background: BRAND.tealSoft, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <Icon size={20} color={BRAND.teal} strokeWidth={1.8} />
-                  </div>
+                  <TopicIcon topic={t} />
                   <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{trimmedQuery ? highlightText(t.title, trimmedQuery) : t.title}</h3>
                   <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{trimmedQuery ? highlightText(t.description, trimmedQuery) : t.description}</p>
                   <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal }}>
