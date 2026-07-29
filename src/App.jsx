@@ -659,6 +659,23 @@ async function deleteQuestionRow(userId, id) {
   if (error) throw error;
 }
 
+// Per-user "resource state" facts for external links — currently only "visited", but
+// deliberately generic (state is a free-text column, one row per user+url+state) so a
+// future "bookmarked" or "reviewed" state is just a new `state` value, not a new table
+// or migration. Used only by the Links & Resources section — Related Tickets is untouched.
+async function fetchAllLinkStates(userId) {
+  const { data, error } = await supabase.from("link_states").select("url, state").eq("user_id", userId);
+  if (error) throw error;
+  return data || []; // [{ url, state }]
+}
+// Records that this user has this state for this url. Safe to call repeatedly — the
+// unique (user_id, url, state) constraint means a duplicate mark is a harmless no-op.
+async function markLinkState(userId, url, state) {
+  const { error } = await supabase.from("link_states")
+    .upsert({ user_id: userId, url, state }, { onConflict: "user_id,url,state", ignoreDuplicates: true });
+  if (error) throw error;
+}
+
 // ---------- App root: auth gate ----------
 
 export default function App() {
@@ -790,6 +807,11 @@ function Hub({ session, profile }) {
   // QuestionsSection's onChange callback — no refetch after every add/answer/delete.
   const [questionsByTopicId, setQuestionsByTopicId] = useState({});
   const [showQuestionsModal, setShowQuestionsModal] = useState(false);
+  // Local, per-user index of link resource states — currently only "visited" — for the
+  // Links & Resources section: { [url]: Set<string> }. Loaded once after login, kept
+  // fresh instantly by markLinkVisited's optimistic update. Generic on purpose: adding a
+  // "bookmarked" state later needs no new state shape, just another entry in each Set.
+  const [linkStatesByUrl, setLinkStatesByUrl] = useState({});
   const toastTimer = useRef(null);
 
   useEffect(() => { loadAll(); }, []);
@@ -801,8 +823,9 @@ function Hub({ session, profile }) {
 
   async function loadAll() {
     try {
-      const [t, p, n, q] = await Promise.all([
-        fetchTopics(), fetchProgress(session.user.id), fetchAllNotes(session.user.id), fetchAllQuestions(session.user.id),
+      const [t, p, n, q, ls] = await Promise.all([
+        fetchTopics(), fetchProgress(session.user.id), fetchAllNotes(session.user.id),
+        fetchAllQuestions(session.user.id), fetchAllLinkStates(session.user.id),
       ]);
       setTopics(t);
       setProgress(p);
@@ -810,10 +833,30 @@ function Hub({ session, profile }) {
       const qByTopic = {};
       q.forEach(row => { (qByTopic[row.topic_id] = qByTopic[row.topic_id] || []).push(row); });
       setQuestionsByTopicId(qByTopic);
+      const statesByUrl = {};
+      ls.forEach(row => {
+        if (!statesByUrl[row.url]) statesByUrl[row.url] = new Set();
+        statesByUrl[row.url].add(row.state);
+      });
+      setLinkStatesByUrl(statesByUrl);
     } catch (err) {
       showToast(err.message || "Couldn't load data.");
       setTopics([]);
     }
+  }
+
+  // Fire-and-forget: mark a Links & Resources URL as visited. Optimistic (updates the UI
+  // immediately) with a silent retry-on-next-click if the write fails — a failed "visited"
+  // mark isn't worth interrupting the user with a toast over, since the link still opened.
+  function markLinkVisited(url) {
+    setLinkStatesByUrl(prev => {
+      if (prev[url]?.has("visited")) return prev; // already marked, nothing to do
+      const next = { ...prev, [url]: new Set([...(prev[url] || []), "visited"]) };
+      return next;
+    });
+    markLinkState(session.user.id, url, "visited").catch(() => {
+      // Leave the optimistic UI state as-is; the next click on this link will just try again.
+    });
   }
 
   function showToast(msg) {
@@ -1149,6 +1192,8 @@ function Hub({ session, profile }) {
           questions={questionsByTopicId[active.id] || []}
           onQuestionsChange={handleQuestionsChange}
           showToast={showToast}
+          linkStatesByUrl={linkStatesByUrl}
+          onVisitLink={markLinkVisited}
         />
       )}
 
@@ -1559,7 +1604,7 @@ function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
 }
 
 
-function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, onNoteSaved, notesFocusOnOpen, notesHighlightQuery, questions, onQuestionsChange, showToast }) {
+function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, onNoteSaved, notesFocusOnOpen, notesHighlightQuery, questions, onQuestionsChange, showToast, linkStatesByUrl, onVisitLink }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState({});
@@ -1625,11 +1670,23 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
                 <div style={{ marginTop: 24 }}>
                   <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: BRAND.teal, marginBottom: 10, fontWeight: 700 }}>Links and resources</h4>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {topic.links.map((l, i) => (
-                      <a key={i} href={l.url} target="_blank" rel="noreferrer" style={{ color: BRAND.teal, fontSize: 14, display: "flex", alignItems: "center", gap: 6, textDecoration: "none", fontWeight: 500 }}>
-                        <Link2 size={13} /> {l.label || l.url} <ExternalLink size={11} style={{ opacity: 0.6 }} />
-                      </a>
-                    ))}
+                    {topic.links.map((l, i) => {
+                      const visited = !!linkStatesByUrl?.[l.url]?.has("visited");
+                      return (
+                        <a
+                          key={i} href={l.url} target="_blank" rel="noreferrer"
+                          onClick={() => onVisitLink && onVisitLink(l.url)}
+                          style={{ color: visited ? "rgba(38,85,100,0.6)" : BRAND.teal, fontSize: 14, display: "flex", alignItems: "center", gap: 6, textDecoration: "none", fontWeight: 500 }}
+                        >
+                          <Link2 size={13} /> {l.label || l.url} <ExternalLink size={11} style={{ opacity: 0.6 }} />
+                          {visited && (
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, fontWeight: 600, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 999, padding: "1px 8px 1px 6px" }}>
+                              <Check size={10} /> Visited
+                            </span>
+                          )}
+                        </a>
+                      );
+                    })}
                   </div>
                 </div>
               )}
