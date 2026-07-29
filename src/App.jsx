@@ -601,10 +601,10 @@ async function fetchProfile(userId) {
   if (error) throw error;
   return data;
 }
-// Generic helpers for a "private per-user, per-topic text row" table — the shape shared
-// by `notes` and `questions`. Both tables store { id, user_id, topic_id, content,
-// updated_at } and are protected by the same style of RLS (auth.uid() = user_id), so a
-// single pair of functions is enough to drive any number of these private sections.
+// Generic helpers for a "private per-user, per-topic single text blob" table — the shape
+// used by `notes` (one row per user per topic, holding one editable block of text).
+// `questions` used to share this shape too, but moved to a one-row-per-question model —
+// see the question-specific helpers below.
 async function fetchPrivateEntry(table, userId, topicId) {
   const { data, error } = await supabase.from(table).select("content, updated_at").eq("user_id", userId).eq("topic_id", topicId).maybeSingle();
   if (error) throw error;
@@ -630,11 +630,34 @@ async function fetchAllNotes(userId) {
   return data || []; // [{ topic_id, content, updated_at }]
 }
 
-// "Questions" are a separate private notebook — deliberately its own table (not mixed
-// into `notes`) so a future "share with my trainer/TL" feature can add its own
-// visibility/RLS rules to `questions` without touching Notes at all.
-async function fetchQuestion(userId, topicId) { return fetchPrivateEntry("questions", userId, topicId); }
-async function upsertQuestion(userId, topicId, content) { return upsertPrivateEntry("questions", userId, topicId, content); }
+// "Questions" are a lightweight per-topic to-do list — one row per question, deliberately
+// kept in its own table (separate from Notes) so a future "share with my trainer/TL"
+// feature, comments/answers, or notifications can be layered onto `questions` without
+// touching Notes at all. Each row already carries everything that future work needs:
+// topic, text, status (answered/unanswered), created_at, updated_at.
+async function fetchAllQuestions(userId) {
+  const { data, error } = await supabase.from("questions").select("id, topic_id, text, status, created_at, updated_at").eq("user_id", userId).order("created_at", { ascending: true });
+  if (error) throw error;
+  return data || []; // [{ id, topic_id, text, status, created_at, updated_at }]
+}
+async function addQuestionRow(userId, topicId, text) {
+  const { data, error } = await supabase.from("questions")
+    .insert({ user_id: userId, topic_id: topicId, text, status: "unanswered" })
+    .select("id, topic_id, text, status, created_at, updated_at")
+    .single();
+  if (error) throw error;
+  return data;
+}
+async function setQuestionStatus(userId, id, status) {
+  const { error } = await supabase.from("questions")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", id).eq("user_id", userId);
+  if (error) throw error;
+}
+async function deleteQuestionRow(userId, id) {
+  const { error } = await supabase.from("questions").delete().eq("id", id).eq("user_id", userId);
+  if (error) throw error;
+}
 
 // ---------- App root: auth gate ----------
 
@@ -762,6 +785,11 @@ function Hub({ session, profile }) {
   // highlighted the next time it's opened — set only when a global search result
   // matched inside "My Notes". Cleared on any normal navigation.
   const [notesSearchTrigger, setNotesSearchTrigger] = useState(null);
+  // Local, per-user index of Questions: { [topicId]: Question[] }. Loaded once after
+  // login (same fetch-once approach as notesByTopicId) and kept fresh in real time by
+  // QuestionsSection's onChange callback — no refetch after every add/answer/delete.
+  const [questionsByTopicId, setQuestionsByTopicId] = useState({});
+  const [showQuestionsModal, setShowQuestionsModal] = useState(false);
   const toastTimer = useRef(null);
 
   useEffect(() => { loadAll(); }, []);
@@ -773,10 +801,15 @@ function Hub({ session, profile }) {
 
   async function loadAll() {
     try {
-      const [t, p, n] = await Promise.all([fetchTopics(), fetchProgress(session.user.id), fetchAllNotes(session.user.id)]);
+      const [t, p, n, q] = await Promise.all([
+        fetchTopics(), fetchProgress(session.user.id), fetchAllNotes(session.user.id), fetchAllQuestions(session.user.id),
+      ]);
       setTopics(t);
       setProgress(p);
       setNotesByTopicId(Object.fromEntries(n.map(r => [r.topic_id, r.content || ""])));
+      const qByTopic = {};
+      q.forEach(row => { (qByTopic[row.topic_id] = qByTopic[row.topic_id] || []).push(row); });
+      setQuestionsByTopicId(qByTopic);
     } catch (err) {
       showToast(err.message || "Couldn't load data.");
       setTopics([]);
@@ -820,6 +853,13 @@ function Hub({ session, profile }) {
     try { await setProgressRow(session.user.id, id, next); } catch (err) { showToast(err.message || "Couldn't save progress."); }
   }
 
+  // Single entry point QuestionsSection calls after every add/answer/unanswer/delete —
+  // keeps Hub's index (and therefore the dashboard reminder + review modal) live with
+  // zero extra network round trips.
+  function handleQuestionsChange(topicId, list) {
+    setQuestionsByTopicId(prev => ({ ...prev, [topicId]: list }));
+  }
+
   async function handleSeed() {
     setSeeding(true);
     try {
@@ -842,6 +882,14 @@ function Hub({ session, profile }) {
   const totalLearningMinutes = topics ? topics.reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const trimmedQuery = searchQuery.trim();
   const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery, notesByTopicId)) : sorted;
+  // Every unanswered question, grouped by topic — powers both the dashboard reminder
+  // count and the "View questions" review modal.
+  const unansweredByTopic = Object.fromEntries(
+    Object.entries(questionsByTopicId)
+      .map(([topicId, list]) => [topicId, list.filter(q => q.status !== "answered")])
+      .filter(([, list]) => list.length > 0)
+  );
+  const unansweredCount = Object.values(unansweredByTopic).reduce((sum, list) => sum + list.length, 0);
 
   // `viaNotesMatch`: true only when this open came from clicking a search result whose
   // match included "My Notes" — drives auto-scroll/focus/highlight in NotesSection.
@@ -973,6 +1021,29 @@ function Hub({ session, profile }) {
                   </div>
                 </div>
               </div>
+
+              {unansweredCount > 0 && (
+                <div style={{ marginTop: 14, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", textAlign: "left" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 15 }}>
+                      ❓
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 13.5, fontWeight: 700 }}>Questions to discuss</div>
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>
+                        You have {unansweredCount} unanswered question{unansweredCount === 1 ? "" : "s"}. Review them with your trainer or Team Leader.
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowQuestionsModal(true)}
+                    className="onb-btn"
+                    style={{ background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, flexShrink: 0 }}
+                  >
+                    View questions
+                  </button>
+                </div>
+              )}
             </>
           )}
 
@@ -1075,6 +1146,27 @@ function Hub({ session, profile }) {
           onNoteSaved={(topicId, content) => setNotesByTopicId(prev => ({ ...prev, [topicId]: content }))}
           notesFocusOnOpen={notesSearchTrigger === active.id}
           notesHighlightQuery={notesSearchTrigger === active.id ? trimmedQuery : ""}
+          questions={questionsByTopicId[active.id] || []}
+          onQuestionsChange={handleQuestionsChange}
+          showToast={showToast}
+        />
+      )}
+
+      {showQuestionsModal && (
+        <QuestionsReviewModal
+          unansweredByTopic={unansweredByTopic}
+          topics={sorted}
+          onClose={() => setShowQuestionsModal(false)}
+          onMarkAnswered={(topicId, q) => {
+            const list = questionsByTopicId[topicId] || [];
+            const nextList = list.map(item => (item.id === q.id ? { ...item, status: "answered", updated_at: new Date().toISOString() } : item));
+            handleQuestionsChange(topicId, nextList);
+            setQuestionStatus(session.user.id, q.id, "answered").catch(err => {
+              handleQuestionsChange(topicId, list); // revert
+              showToast(err?.message || "Couldn't update question. Try again.");
+            });
+          }}
+          onOpenTopic={(topicId) => { setShowQuestionsModal(false); openTopic(topicId); }}
         />
       )}
 
@@ -1327,28 +1419,147 @@ function NotesSection({ userId, topicId, onSaved, focusOnOpen, highlightQuery })
   );
 }
 
-// A private space to jot down questions to bring to a trainer/Team Leader later — kept in
-// its own `questions` table (separate from Notes) specifically so a future "share with my
-// trainer/TL" feature can add its own visibility rules without touching Notes at all.
-// For now it's fully private, same as Notes, and not part of global search.
-function QuestionsSection({ userId, topicId }) {
-  const { content, loaded, status, lastSavedAt, textareaRef, handleChange } = usePrivateAutosaveField({
-    table: "questions", fetchEntry: fetchQuestion, upsertEntry: upsertQuestion, userId, topicId,
-  });
+// A lightweight per-topic question to-do list — separate from Notes both in intent
+// (things you don't understand yet, to raise with a trainer/TL, vs. things you already
+// know and want to remember) and in storage (its own `questions` table, one row per
+// question). Hub already loads every question the user has, across every topic, once at
+// login — so this component is pure presentation + optimistic mutation, no per-topic
+// fetch and no loading flicker when a topic is opened.
+function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [showAnswered, setShowAnswered] = useState(false);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (adding && inputRef.current) inputRef.current.focus();
+  }, [adding]);
+
+  const unanswered = questions.filter(q => q.status !== "answered");
+  const answered = questions.filter(q => q.status === "answered");
+
+  async function handleAdd() {
+    const text = draft.trim();
+    if (!text) { setAdding(false); setDraft(""); return; }
+    setDraft("");
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const now = new Date().toISOString();
+    const optimisticList = [...questions, { id: tempId, topic_id: topicId, text, status: "unanswered", created_at: now, updated_at: now }];
+    onChange(optimisticList);
+    try {
+      const saved = await addQuestionRow(userId, topicId, text);
+      onChange(optimisticList.map(q => (q.id === tempId ? saved : q)));
+    } catch (err) {
+      onChange(questions); // revert to the pre-optimistic list
+      showToast(err?.message || "Couldn't add question. Try again.");
+    }
+  }
+
+  async function handleSetStatus(q, status) {
+    const nextList = questions.map(item => (item.id === q.id ? { ...item, status, updated_at: new Date().toISOString() } : item));
+    onChange(nextList);
+    try {
+      await setQuestionStatus(userId, q.id, status);
+    } catch (err) {
+      onChange(questions); // revert
+      showToast(err?.message || "Couldn't update question. Try again.");
+    }
+  }
+
+  async function handleDelete(q) {
+    const nextList = questions.filter(item => item.id !== q.id);
+    onChange(nextList);
+    try {
+      await deleteQuestionRow(userId, q.id);
+    } catch (err) {
+      onChange(questions); // revert
+      showToast(err?.message || "Couldn't delete question. Try again.");
+    }
+  }
+
+  const draftInputStyle = { flex: 1, background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, color: BRAND.darkTeal, padding: "9px 12px", fontSize: 13.5, boxSizing: "border-box", fontFamily: font };
 
   return (
-    <AutosaveTextCard
-      icon="❓" title="My Questions" subtitle="Private space to note things you'd like to ask your trainer or Team Leader later. Only visible to you."
-      content={content} loaded={loaded} status={status} lastSavedAt={lastSavedAt}
-      textareaRef={textareaRef} onChange={handleChange}
-      placeholderLoaded={'e.g. "How does private domain registration actually work?"'}
-      placeholderLoading="Loading your questions…"
-    />
+    <div style={{ marginTop: 24, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "18px 20px" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+        <div>
+          <h4 style={{ fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>❓ My Questions</h4>
+          <p style={{ fontSize: 12, color: BRAND.teal, margin: 0 }}>Questions to discuss with your trainer or Team Leader.</p>
+        </div>
+        {!adding && (
+          <button onClick={() => setAdding(true)} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "6px 12px", color: BRAND.teal, fontSize: 12.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+            <Plus size={13} /> Add question
+          </button>
+        )}
+      </div>
+
+      {adding && (
+        <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+          <input
+            ref={inputRef}
+            type="text"
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter") { e.preventDefault(); handleAdd(); }
+              if (e.key === "Escape") { setDraft(""); setAdding(false); }
+            }}
+            placeholder='e.g. "How does private domain registration work?"'
+            style={draftInputStyle}
+          />
+          <button onClick={handleAdd} className="onb-btn" style={{ background: BRAND.darkTeal, border: "none", borderRadius: 8, padding: "0 14px", color: BRAND.white, fontSize: 13, fontWeight: 600 }}>Add</button>
+          <button onClick={() => { setDraft(""); setAdding(false); }} title="Cancel" className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", color: BRAND.teal, display: "flex", alignItems: "center" }}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+        {unanswered.length === 0 && !adding && (
+          <p style={{ fontSize: 12.5, color: BRAND.teal, margin: 0, fontStyle: "italic" }}>No open questions for this topic yet.</p>
+        )}
+        {unanswered.map(q => (
+          <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8, background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px 10px" }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", border: `2px solid ${BRAND.teal}`, flexShrink: 0 }} />
+            <span style={{ flex: 1, fontSize: 13.5, color: BRAND.darkTeal, lineHeight: 1.4 }}>{q.text}</span>
+            <button onClick={() => handleSetStatus(q, "answered")} title="Mark as answered" className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal, padding: 4, display: "flex", flexShrink: 0 }}>
+              <Check size={15} />
+            </button>
+            <button onClick={() => handleDelete(q)} title="Delete" className="onb-btn" style={{ background: "transparent", border: "none", color: "#C0392B", padding: 4, display: "flex", flexShrink: 0 }}>
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {answered.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <button onClick={() => setShowAnswered(s => !s)} className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal, fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
+            <ChevronRight size={12} style={{ transform: showAnswered ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
+            Answered questions ({answered.length})
+          </button>
+          {showAnswered && (
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+              {answered.map(q => (
+                <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px" }}>
+                  <Check size={13} color={BRAND.teal} style={{ flexShrink: 0 }} />
+                  <span style={{ flex: 1, fontSize: 13, color: "rgba(38,85,100,0.55)", textDecoration: "line-through", lineHeight: 1.4 }}>{q.text}</span>
+                  <button onClick={() => handleSetStatus(q, "unanswered")} title="Mark as unanswered" className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal, fontSize: 11, padding: 4, flexShrink: 0 }}>Undo</button>
+                  <button onClick={() => handleDelete(q)} title="Delete" className="onb-btn" style={{ background: "transparent", border: "none", color: "#C0392B", padding: 4, display: "flex", flexShrink: 0 }}>
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
 
-function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, onNoteSaved, notesFocusOnOpen, notesHighlightQuery }) {
+function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, onNoteSaved, notesFocusOnOpen, notesHighlightQuery, questions, onQuestionsChange, showToast }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState({});
@@ -1461,7 +1672,10 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
                 focusOnOpen={notesFocusOnOpen} highlightQuery={notesHighlightQuery}
               />
 
-              <QuestionsSection userId={userId} topicId={topic.id} />
+              <QuestionsSection
+                userId={userId} topicId={topic.id} questions={questions}
+                onChange={list => onQuestionsChange(topic.id, list)} showToast={showToast}
+              />
             </>
           )}
 
@@ -1521,6 +1735,59 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
           <button onClick={onToggleDone} className="onb-btn" style={{ width: "100%", background: done ? BRAND.lime : BRAND.sand, border: done ? "none" : `1px solid ${BRAND.sandBorder}`, color: BRAND.darkTeal, borderRadius: 10, padding: "11px", fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             <Check size={16} /> {done ? "Topic complete" : "Mark as complete"}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Questions review modal ----------
+// Opened from the dashboard reminder card. Read-mostly: groups every unanswered
+// question by topic so it's easy to run through with a trainer/Team Leader, with a
+// quick "mark as answered" action per item and a link back into the topic itself.
+function QuestionsReviewModal({ unansweredByTopic, topics, onClose, onMarkAnswered, onOpenTopic }) {
+  const groups = topics
+    .map(t => ({ topic: t, items: unansweredByTopic[t.id] || [] }))
+    .filter(g => g.items.length > 0);
+  const total = groups.reduce((sum, g) => sum + g.items.length, 0);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,60,71,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 55, padding: 20 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: BRAND.white, borderRadius: 16, width: "100%", maxWidth: 600, maxHeight: "82vh", overflowY: "auto", display: "flex", flexDirection: "column" }}>
+        <div style={{ padding: "20px 24px", borderBottom: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 19, fontWeight: 700, color: BRAND.darkTeal }}>❓ Questions to discuss</h2>
+            <p style={{ margin: "4px 0 0", fontSize: 13, color: BRAND.teal }}>{total} unanswered question{total === 1 ? "" : "s"}, grouped by topic.</p>
+          </div>
+          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: 8, color: BRAND.teal }}><X size={15} /></button>
+        </div>
+        <div style={{ padding: "16px 24px 24px", display: "flex", flexDirection: "column", gap: 20 }}>
+          {groups.length === 0 && (
+            <p style={{ fontSize: 13, color: BRAND.teal }}>No unanswered questions left. 🎉</p>
+          )}
+          {groups.map(({ topic, items }) => (
+            <div key={topic.id}>
+              <button
+                onClick={() => onOpenTopic(topic.id)}
+                className="onb-btn"
+                style={{ background: "transparent", border: "none", padding: 0, fontSize: 13, fontWeight: 700, color: BRAND.darkTeal, display: "flex", alignItems: "center", gap: 5 }}
+                title="Open this topic"
+              >
+                {topic.title} <ExternalLink size={11} style={{ opacity: 0.6 }} />
+              </button>
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {items.map(q => (
+                  <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px 10px" }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", border: `2px solid ${BRAND.teal}`, flexShrink: 0 }} />
+                    <span style={{ flex: 1, fontSize: 13.5, color: BRAND.darkTeal, lineHeight: 1.4 }}>{q.text}</span>
+                    <button onClick={() => onMarkAnswered(topic.id, q)} title="Mark as answered" className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal, padding: 4, display: "flex", flexShrink: 0 }}>
+                      <Check size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
