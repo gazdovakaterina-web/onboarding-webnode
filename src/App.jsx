@@ -452,6 +452,18 @@ function formatStatTime(totalMinutes) {
   return `${hours} ${hours === 1 ? "Hour" : "Hours"}`;
 }
 
+// "Saved today at 09:42" / "Saved yesterday at 09:42" / "Saved Jul 12 at 09:42"
+function formatSavedTime(date) {
+  if (!date) return "";
+  const now = new Date();
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (date.toDateString() === now.toDateString()) return `today at ${time}`;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return `yesterday at ${time}`;
+  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} at ${time}`;
+}
+
 // ---------- Supabase data helpers ----------
 
 async function fetchTopics() {
@@ -492,6 +504,18 @@ async function fetchProfile(userId) {
   const { data, error } = await supabase.from("profiles").select("id, email, role").eq("id", userId).single();
   if (error) throw error;
   return data;
+}
+async function fetchNote(userId, topicId) {
+  const { data, error } = await supabase.from("notes").select("content, updated_at").eq("user_id", userId).eq("topic_id", topicId).maybeSingle();
+  if (error) throw error;
+  return data; // null when the user has no note for this topic yet
+}
+async function upsertNote(userId, topicId, content) {
+  const { error } = await supabase.from("notes").upsert(
+    { user_id: userId, topic_id: topicId, content, updated_at: new Date().toISOString() },
+    { onConflict: "user_id,topic_id" }
+  );
+  if (error) throw error;
 }
 
 // ---------- App root: auth gate ----------
@@ -939,6 +963,121 @@ function Hub({ session, profile }) {
 
 // ---------- Topic viewer (slides + quiz) ----------
 
+// ---------- Personal notes ----------
+// Private per-user, per-topic notebook. Autosaves 1s after typing stops, never on a
+// timer/interval while the user is actively typing, and flushes any unsaved change
+// immediately if the topic is closed (or a different topic is opened) before that
+// 1s window elapses.
+function NotesSection({ userId, topicId }) {
+  const [content, setContent] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [status, setStatus] = useState("idle"); // "idle" | "saving" | "saved" | "error"
+  const [lastSavedAt, setLastSavedAt] = useState(null);
+  const contentRef = useRef("");
+  const lastSavedRef = useRef("");
+  const timerRef = useRef(null);
+  const textareaRef = useRef(null);
+
+  const resize = (el) => {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.max(el.scrollHeight, 180) + "px";
+  };
+
+  // Load this topic's note whenever the topic changes.
+  useEffect(() => {
+    let cancelled = false;
+    setLoaded(false);
+    setStatus("idle");
+    setContent("");
+    contentRef.current = "";
+    lastSavedRef.current = "";
+    setLastSavedAt(null);
+    (async () => {
+      try {
+        const note = await fetchNote(userId, topicId);
+        if (cancelled) return;
+        const text = note?.content || "";
+        setContent(text);
+        contentRef.current = text;
+        lastSavedRef.current = text;
+        if (note?.updated_at) { setLastSavedAt(new Date(note.updated_at)); setStatus("saved"); }
+      } catch {
+        // Editor stays usable even if the initial fetch fails — just no "Saved" timestamp yet.
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userId, topicId]);
+
+  useEffect(() => { resize(textareaRef.current); }, [content, loaded]);
+
+  // Saves immediately, skipping the debounce — used when leaving the topic and when a
+  // pending debounce needs to be superseded. Never writes if nothing actually changed.
+  const flush = () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    if (contentRef.current !== lastSavedRef.current) {
+      const toSave = contentRef.current;
+      lastSavedRef.current = toSave;
+      upsertNote(userId, topicId, toSave).catch(() => {});
+    }
+  };
+
+  // Flush on topic switch / close (cleanup runs when userId/topicId change AND on unmount),
+  // so notes typed right before leaving the topic are never lost.
+  useEffect(() => {
+    return () => { flush(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, topicId]);
+
+  function handleChange(e) {
+    const text = e.target.value;
+    setContent(text);
+    contentRef.current = text;
+    if (!loaded) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(async () => {
+      timerRef.current = null;
+      if (text === lastSavedRef.current) return;
+      setStatus("saving");
+      try {
+        await upsertNote(userId, topicId, text);
+        lastSavedRef.current = text;
+        setLastSavedAt(new Date());
+        setStatus("saved");
+      } catch {
+        setStatus("error");
+      }
+    }, 1000);
+  }
+
+  return (
+    <div style={{ marginTop: 24, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "18px 20px" }}>
+      <h4 style={{ fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>📝 My Notes</h4>
+      <p style={{ fontSize: 12, color: BRAND.teal, margin: "0 0 12px" }}>These notes are private and only visible to you.</p>
+      <textarea
+        ref={textareaRef}
+        value={content}
+        onChange={handleChange}
+        disabled={!loaded}
+        placeholder="Jot down anything you'd like to remember about this topic…"
+        style={{
+          width: "100%", boxSizing: "border-box", minHeight: 180, resize: "none", overflow: "hidden",
+          border: `1px solid ${BRAND.sandBorder}`, borderRadius: 10, padding: "12px 14px",
+          fontSize: 14, lineHeight: 1.6, color: BRAND.darkTeal, background: BRAND.white, fontFamily: font,
+        }}
+      />
+      <div style={{ marginTop: 8, fontSize: 12, color: BRAND.teal, minHeight: 16, display: "flex", alignItems: "center", gap: 6 }}>
+        {status === "saving" && <><Loader2 size={12} className="animate-spin" /> Saving…</>}
+        {status === "saved" && lastSavedAt && <><Check size={12} /> Saved {formatSavedTime(lastSavedAt)}</>}
+        {status === "error" && <span style={{ color: "#C0392B" }}>Couldn't save — will retry as you keep typing.</span>}
+      </div>
+    </div>
+  );
+}
+
+
 function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
@@ -1046,6 +1185,8 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
                   <Zap size={16} color={BRAND.lime} /> Test your knowledge ({topic.quiz.length} question{topic.quiz.length > 1 ? "s" : ""})
                 </button>
               )}
+
+              <NotesSection userId={userId} topicId={topic.id} />
             </>
           )}
 
