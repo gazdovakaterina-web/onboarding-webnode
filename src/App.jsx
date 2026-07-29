@@ -444,6 +444,14 @@ function formatMinutes(totalMinutes) {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
+// Compact rounded form used for the hero's "Learning Time" summary stat, e.g. "33 Hours" / "45 Min".
+function formatStatTime(totalMinutes) {
+  const mins = Math.max(0, Math.round(totalMinutes));
+  if (mins < 60) return `${mins} Min`;
+  const hours = Math.round(mins / 60);
+  return `${hours} ${hours === 1 ? "Hour" : "Hours"}`;
+}
+
 // ---------- Supabase data helpers ----------
 
 async function fetchTopics() {
@@ -673,6 +681,8 @@ function Hub({ session, profile }) {
   const totalDone = topics ? topics.filter(t => progress[t.id]).length : 0;
   const totalCount = topics ? topics.length : 0;
   const remainingMinutes = topics ? topics.filter(t => !progress[t.id]).reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
+  const totalQuizzes = topics ? topics.reduce((sum, t) => sum + ((t.quiz && t.quiz.length) || 0), 0) : 0;
+  const totalLearningMinutes = topics ? topics.reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const trimmedQuery = searchQuery.trim();
   const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery)) : sorted;
 
@@ -717,7 +727,7 @@ function Hub({ session, profile }) {
         input, textarea, select { font-family: inherit; }
       `}</style>
 
-      <div style={{ background: BRAND.darkTeal, color: BRAND.white, padding: "44px 32px 36px" }}>
+      <div style={{ background: BRAND.darkTeal, color: BRAND.white, padding: "40px 32px 32px" }}>
         <div style={{ maxWidth: 900, margin: "0 auto", textAlign: "center" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18, fontSize: 12.5, color: "rgba(255,255,255,0.65)" }}>
             <span>{session.user.email} · {isEditor ? "Editor" : "Viewer"}</span>
@@ -725,16 +735,16 @@ function Hub({ session, profile }) {
               <LogOut size={13} /> Sign out
             </button>
           </div>
-          <div style={{ display: "inline-block", fontSize: 12, letterSpacing: "0.12em", color: BRAND.lime, textTransform: "uppercase", marginBottom: 14, fontWeight: 500 }}>
-            Webnode · Onboarding
+          <div style={{ display: "inline-block", fontSize: 11.5, letterSpacing: "0.16em", color: BRAND.lime, textTransform: "uppercase", marginBottom: 12, fontWeight: 600 }}>
+            Webnode • Customer Care
           </div>
-          <h1 style={{ fontSize: 38, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>Welcome</h1>
-          <p style={{ color: "rgba(255,255,255,0.7)", fontSize: 15.5, lineHeight: 1.6, marginTop: 12, maxWidth: 520, marginLeft: "auto", marginRight: "auto" }}>
-            Below you'll find all the topics we'll cover during your onboarding. Take them one by one and you'll gradually get to know our product, processes, and the tools you'll be using every day.
+          <h1 style={{ fontSize: 34, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>Your Learning Hub</h1>
+          <p style={{ color: "rgba(255,255,255,0.65)", fontSize: 14.5, lineHeight: 1.55, marginTop: 10, maxWidth: 480, marginLeft: "auto", marginRight: "auto" }}>
+            Learn at your own pace, track your progress, and build confidence with every topic.
           </p>
 
           {sorted.length > 0 && (
-            <div style={{ position: "relative", maxWidth: 420, margin: "24px auto 0" }}>
+            <div style={{ position: "relative", maxWidth: 420, margin: "22px auto 0" }}>
               <Search size={15} color="rgba(255,255,255,0.55)" style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
               <input
                 type="text"
@@ -762,7 +772,7 @@ function Hub({ session, profile }) {
 
           {sorted.length > 0 && (
             <>
-              <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 32, overflowX: "auto", padding: "8px 4px", justifyContent: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 0, marginTop: 26, overflowX: "auto", padding: "8px 4px", justifyContent: "center" }}>
                 {sorted.map((t, i, arr) => (
                   <div key={t.id} style={{ display: "flex", alignItems: "center", flex: "0 0 auto" }}>
                     <button onClick={() => openTopic(t.id)} title={t.title} className="onb-btn" style={{ width: 13, height: 13, borderRadius: "50%", border: "none", background: progress[t.id] ? BRAND.lime : "rgba(255,255,255,0.25)", boxShadow: progress[t.id] ? "0 0 0 4px rgba(183,239,135,0.25)" : "none" }} />
@@ -770,11 +780,41 @@ function Hub({ session, profile }) {
                   </div>
                 ))}
               </div>
-              <p style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", marginTop: 12 }}>{totalDone} of {totalCount} topics complete</p>
-              <div style={{ marginTop: 6, fontSize: 13, color: "rgba(255,255,255,0.6)" }}>
-                Remaining learning time
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 4, fontSize: 15, fontWeight: 700, color: BRAND.lime }}>
-                  <Clock size={14} /> {formatMinutes(remainingMinutes)}
+
+              {/* Summary stats — computed live from topic data */}
+              <div style={{ display: "flex", gap: 10, marginTop: 22, flexWrap: "wrap" }}>
+                {[
+                  { icon: FileText, value: totalCount, label: totalCount === 1 ? "Topic" : "Topics" },
+                  { icon: Zap, value: totalQuizzes, label: totalQuizzes === 1 ? "Quiz" : "Quizzes" },
+                  { icon: Clock, value: formatStatTime(totalLearningMinutes), label: "Learning Time" },
+                ].map((stat, idx) => (
+                  <div key={idx} style={{ flex: "1 1 120px", minWidth: 110, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 12, padding: "12px 10px" }}>
+                    <stat.icon size={14} color={BRAND.lime} style={{ marginBottom: 4 }} />
+                    <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1.2 }}>{stat.value}</div>
+                    <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.6)", marginTop: 1 }}>{stat.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Progress summary — compact cards replacing the old plain-text lines */}
+              <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 180px", minWidth: 170, background: "rgba(183,239,135,0.1)", border: "1px solid rgba(183,239,135,0.3)", borderRadius: 12, padding: "12px 14px", textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 30, height: 30, borderRadius: "50%", background: BRAND.lime, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <Check size={15} color={BRAND.darkTeal} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.65)" }}>Progress</div>
+                    <div style={{ fontSize: 15, fontWeight: 700 }}>{totalDone} / {totalCount} topics</div>
+                  </div>
+                </div>
+                <div style={{ flex: "1 1 180px", minWidth: 170, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "12px 14px", textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 30, height: 30, borderRadius: "50%", background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <Clock size={15} color={BRAND.white} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.65)" }}>Remaining Learning Time</div>
+                    <div style={{ fontSize: 15, fontWeight: 700 }}>{formatMinutes(remainingMinutes)}</div>
+                  </div>
                 </div>
               </div>
             </>
@@ -785,7 +825,7 @@ function Hub({ session, profile }) {
               className="onb-btn"
               onClick={() => setEditMode(e => !e)}
               style={{
-                marginTop: 22, background: editMode ? BRAND.lime : "transparent",
+                marginTop: 20, background: editMode ? BRAND.lime : "transparent",
                 color: editMode ? BRAND.darkTeal : BRAND.white,
                 border: editMode ? "none" : "1px solid rgba(255,255,255,0.35)",
                 borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 500,
