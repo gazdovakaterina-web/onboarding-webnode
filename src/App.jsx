@@ -100,6 +100,56 @@ const DEFAULT_TOPICS = [
     title: "Migration", description: "One-shot: move old evaluations into the archive and set up the new store.",
     slides: [ { id: "s1", title: "What it does", bullets: ["- Moves old data into the archive", "- Initializes the new evaluations store"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "life-at-webnode", estimatedTime: 8, icon: "mapPin", order: 14,
+    title: "Life at Webnode", description: "How everyday life, support, and culture work here — who to ask, where things are, and how we work together.",
+    slides: [
+      { id: "s1", title: "Your support network", bullets: [
+        "During onboarding you're never figuring things out alone. There's a simple chain to lean on:",
+        "1. Your trainer — your first stop for day-to-day questions",
+        "2. Your Team Leader — for anything your trainer can't answer, or team/process questions",
+        "3. Senior agents — happy to help with tricky tickets or product knowledge",
+        "Add the real names and contacts for your team here.",
+      ] },
+      { id: "s2", title: "Who to ask, for what", bullets: [
+        "Different questions go to different people. As a rule of thumb:",
+        "- Product or ticket questions → your trainer or a senior agent",
+        "- Team, schedule, or performance questions → your Team Leader",
+        "- Payroll, contracts, time off → HR",
+        "- Laptop, accounts, access issues → ITC",
+        "- Building, badges, visitors → Reception",
+      ] },
+      { id: "s3", title: "HR", bullets: [
+        "- Add HR's contact details and office location here",
+        "- What HR helps with: contracts, payroll, time off, benefits",
+        "- Add a link to the HR request/ticket system if there is one",
+      ] },
+      { id: "s4", title: "Reception", bullets: [
+        "- Add reception's location and contact details here",
+        "- What reception helps with: visitors, deliveries, badges, meeting rooms",
+      ] },
+      { id: "s5", title: "ITC", bullets: [
+        "- Add ITC's contact details here",
+        "- What ITC helps with: laptop setup, account access, software installs, hardware issues",
+        "- Add a link to the IT helpdesk/ticket system if there is one",
+      ] },
+      { id: "s6", title: "Kitchen & office", bullets: [
+        "- Add kitchen location, opening hours, and house rules here",
+        "- Add any office-specific info: parking, lockers, meeting rooms, quiet zones",
+      ] },
+      { id: "s7", title: "Internal communication", bullets: [
+        "- Add the primary chat tool here (e.g. Slack) and which channels to join first",
+        "- Add guidance on when to use chat vs. email vs. a quick call",
+        "- Add a link to the internal wiki or knowledge base if there is one",
+      ] },
+      { id: "s8", title: "Company culture", bullets: [
+        "A few things that shape how we work day to day:",
+        "- We're on a first-name basis with everyone, no matter the role",
+        "- Punctuality matters — for shifts, meetings, and breaks",
+        "- We help each other out — asking questions is expected, not a weakness",
+        "Add more specifics about your team's culture here.",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: ["No question is too small — asking early saves time for everyone later."], quiz: [] },
 ];
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -361,9 +411,14 @@ function FormattingToolbar({ value, onChange, getTextarea }) {
 
 // ---------- Global search ----------
 // Searches across everything the app stores for a topic: title, description, slide
-// titles/content, tips, links, related tickets, and quiz questions (+ their options).
-// Matching is a simple case-insensitive substring match — fast, predictable, and works
-// the same way whether the stored text is plain or uses the markdown syntax above.
+// titles/content, tips, links, related tickets, quiz questions (+ their options), and
+// the current user's own Personal Notes for that topic. Matching is a simple
+// case-insensitive substring match — fast, predictable, and works the same way whether
+// the stored text is plain or uses the markdown syntax above.
+//
+// Notes are never part of the `topic` object (not stored in topic JSON, not sent to
+// editors as topic data) — they live only in the caller-supplied `notesByTopicId` map,
+// which Hub populates from the current user's own rows in the private `notes` table.
 const SEARCH_FIELDS = [
   { key: "title", label: "Title" },
   { key: "description", label: "Description" },
@@ -373,9 +428,10 @@ const SEARCH_FIELDS = [
   { key: "links", label: "Links" },
   { key: "tickets", label: "Related tickets" },
   { key: "quiz", label: "Quiz questions" },
+  { key: "notes", label: "My Notes" },
 ];
 
-function getSearchableFieldText(topic, key) {
+function getSearchableFieldText(topic, key, notesByTopicId) {
   switch (key) {
     case "title": return topic.title || "";
     case "description": return topic.description || "";
@@ -385,16 +441,19 @@ function getSearchableFieldText(topic, key) {
     case "links": return (topic.links || []).map(l => `${l.label || ""} ${l.url || ""}`).join(" \n ");
     case "tickets": return (topic.ticketLinks || []).map(l => `${l.label || ""} ${l.url || ""}`).join(" \n ");
     case "quiz": return (topic.quiz || []).map(q => `${q.question || ""} ${(q.options || []).join(" ")}`).join(" \n ");
+    case "notes": return (notesByTopicId && notesByTopicId[topic.id]) || "";
     default: return "";
   }
 }
 
 // Returns the list of matched field descriptors ({ key, label }) for a topic, or null
 // if the query doesn't match anywhere. `query` is expected to already be trimmed.
-function getTopicMatch(topic, query) {
+// `notesByTopicId` is optional — omitting it simply skips the notes field (used by
+// contexts that don't have the current user's notes loaded).
+function getTopicMatch(topic, query, notesByTopicId) {
   if (!query) return null;
   const q = query.toLowerCase();
-  const matched = SEARCH_FIELDS.filter(f => getSearchableFieldText(topic, f.key).toLowerCase().includes(q));
+  const matched = SEARCH_FIELDS.filter(f => getSearchableFieldText(topic, f.key, notesByTopicId).toLowerCase().includes(q));
   return matched.length > 0 ? matched : null;
 }
 
@@ -505,18 +564,40 @@ async function fetchProfile(userId) {
   if (error) throw error;
   return data;
 }
-async function fetchNote(userId, topicId) {
-  const { data, error } = await supabase.from("notes").select("content, updated_at").eq("user_id", userId).eq("topic_id", topicId).maybeSingle();
+// Generic helpers for a "private per-user, per-topic text row" table — the shape shared
+// by `notes` and `questions`. Both tables store { id, user_id, topic_id, content,
+// updated_at } and are protected by the same style of RLS (auth.uid() = user_id), so a
+// single pair of functions is enough to drive any number of these private sections.
+async function fetchPrivateEntry(table, userId, topicId) {
+  const { data, error } = await supabase.from(table).select("content, updated_at").eq("user_id", userId).eq("topic_id", topicId).maybeSingle();
   if (error) throw error;
-  return data; // null when the user has no note for this topic yet
+  return data; // null when the user has no row for this topic yet
 }
-async function upsertNote(userId, topicId, content) {
-  const { error } = await supabase.from("notes").upsert(
+async function upsertPrivateEntry(table, userId, topicId, content) {
+  const { error } = await supabase.from(table).upsert(
     { user_id: userId, topic_id: topicId, content, updated_at: new Date().toISOString() },
     { onConflict: "user_id,topic_id" }
   );
   if (error) throw error;
 }
+
+async function fetchNote(userId, topicId) { return fetchPrivateEntry("notes", userId, topicId); }
+async function upsertNote(userId, topicId, content) { return upsertPrivateEntry("notes", userId, topicId, content); }
+// Loads every note belonging to the current user in one request (RLS already scopes
+// this to auth.uid() = user_id — this query never sees other users' notes). Used once
+// after login to power local, offline search across notes without hitting the network
+// on every keystroke.
+async function fetchAllNotes(userId) {
+  const { data, error } = await supabase.from("notes").select("topic_id, content, updated_at").eq("user_id", userId);
+  if (error) throw error;
+  return data || []; // [{ topic_id, content, updated_at }]
+}
+
+// "Questions" are a separate private notebook — deliberately its own table (not mixed
+// into `notes`) so a future "share with my trainer/TL" feature can add its own
+// visibility/RLS rules to `questions` without touching Notes at all.
+async function fetchQuestion(userId, topicId) { return fetchPrivateEntry("questions", userId, topicId); }
+async function upsertQuestion(userId, topicId, content) { return upsertPrivateEntry("questions", userId, topicId, content); }
 
 // ---------- App root: auth gate ----------
 
@@ -636,15 +717,29 @@ function Hub({ session, profile }) {
   const [seeding, setSeeding] = useState(false);
   const [toast, setToast] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  // Local, per-user search index of Personal Notes: { [topicId]: content }. Loaded once
+  // after login (never on every keystroke) and kept fresh by NotesSection's onSaved
+  // callback. This is UI-local state only — never merged into `topics`/editor drafts.
+  const [notesByTopicId, setNotesByTopicId] = useState({});
+  // Id of the topic whose Notes section should be auto-focused, scrolled to, and
+  // highlighted the next time it's opened — set only when a global search result
+  // matched inside "My Notes". Cleared on any normal navigation.
+  const [notesSearchTrigger, setNotesSearchTrigger] = useState(null);
   const toastTimer = useRef(null);
 
   useEffect(() => { loadAll(); }, []);
 
+  // Requirement: clear the notes highlight/focus trigger as soon as the search is cleared.
+  useEffect(() => {
+    if (!searchQuery.trim()) setNotesSearchTrigger(null);
+  }, [searchQuery]);
+
   async function loadAll() {
     try {
-      const [t, p] = await Promise.all([fetchTopics(), fetchProgress(session.user.id)]);
+      const [t, p, n] = await Promise.all([fetchTopics(), fetchProgress(session.user.id), fetchAllNotes(session.user.id)]);
       setTopics(t);
       setProgress(p);
+      setNotesByTopicId(Object.fromEntries(n.map(r => [r.topic_id, r.content || ""])));
     } catch (err) {
       showToast(err.message || "Couldn't load data.");
       setTopics([]);
@@ -704,14 +799,17 @@ function Hub({ session, profile }) {
   const sorted = topics ? [...topics].sort((a, b) => a.order - b.order) : [];
   const totalDone = topics ? topics.filter(t => progress[t.id]).length : 0;
   const totalCount = topics ? topics.length : 0;
+  const progressPct = totalCount > 0 ? Math.round((totalDone / totalCount) * 100) : 0;
   const remainingMinutes = topics ? topics.filter(t => !progress[t.id]).reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const totalQuizzes = topics ? topics.reduce((sum, t) => sum + ((t.quiz && t.quiz.length) || 0), 0) : 0;
   const totalLearningMinutes = topics ? topics.reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const trimmedQuery = searchQuery.trim();
-  const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery)) : sorted;
+  const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery, notesByTopicId)) : sorted;
 
-  function openTopic(id) { setActiveId(id); setSlideIdx(0); }
-  function closeTopic() { setActiveId(null); setSlideIdx(0); }
+  // `viaNotesMatch`: true only when this open came from clicking a search result whose
+  // match included "My Notes" — drives auto-scroll/focus/highlight in NotesSection.
+  function openTopic(id, viaNotesMatch) { setActiveId(id); setSlideIdx(0); setNotesSearchTrigger(viaNotesMatch ? id : null); }
+  function closeTopic() { setActiveId(null); setSlideIdx(0); setNotesSearchTrigger(null); }
   function startEdit(topic) { setEditDraft(JSON.parse(JSON.stringify(topic))); }
   function startNewTopic() {
     setEditDraft({
@@ -826,9 +924,15 @@ function Hub({ session, profile }) {
                   <div style={{ width: 30, height: 30, borderRadius: "50%", background: BRAND.lime, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     <Check size={15} color={BRAND.darkTeal} />
                   </div>
-                  <div>
-                    <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.65)" }}>Progress</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 6 }}>
+                      <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.65)" }}>Progress</div>
+                      <div style={{ fontSize: 11.5, color: BRAND.lime, fontWeight: 700 }}>{progressPct}%</div>
+                    </div>
                     <div style={{ fontSize: 15, fontWeight: 700 }}>{totalDone} / {totalCount} topics</div>
+                    <div style={{ marginTop: 5, height: 4, borderRadius: 999, background: "rgba(255,255,255,0.15)", overflow: "hidden" }}>
+                      <div style={{ width: `${progressPct}%`, height: "100%", background: BRAND.lime, borderRadius: 999, transition: "width .3s ease" }} />
+                    </div>
                   </div>
                 </div>
                 <div style={{ flex: "1 1 180px", minWidth: 170, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "12px 14px", textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
@@ -887,10 +991,11 @@ function Hub({ session, profile }) {
             {filtered.map(t => {
               const Icon = ICONS[t.icon] || FileText;
               const done = !!progress[t.id];
-              const match = trimmedQuery ? getTopicMatch(t, trimmedQuery) : null;
+              const match = trimmedQuery ? getTopicMatch(t, trimmedQuery, notesByTopicId) : null;
               const otherMatches = match ? match.filter(f => f.key !== "title" && f.key !== "description").map(f => f.label) : [];
+              const matchedNotes = !!(match && match.some(f => f.key === "notes"));
               return (
-                <div key={t.id} className="onb-card" onClick={() => openTopic(t.id)} style={{ background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderTop: `3px solid ${BRAND.teal}`, borderRadius: 12, padding: "20px 20px 18px", position: "relative" }}>
+                <div key={t.id} className="onb-card" onClick={() => openTopic(t.id, matchedNotes)} style={{ background: done ? BRAND.limeSoft : BRAND.white, border: `1px solid ${done ? "rgba(183,239,135,0.6)" : BRAND.sandBorder}`, borderTop: `3px solid ${done ? BRAND.lime : BRAND.teal}`, borderRadius: 12, padding: "20px 20px 18px", position: "relative" }}>
                   {editMode && (
                     <button onClick={(e) => { e.stopPropagation(); startEdit(t); }} className="onb-btn" style={{ position: "absolute", top: 12, right: 12, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: 5, color: BRAND.teal }}>
                       <Pencil size={13} />
@@ -942,6 +1047,9 @@ function Hub({ session, profile }) {
           done={!!progress[active.id]} onToggleDone={() => toggleComplete(active.id)}
           editMode={editMode && isEditor} onEdit={() => startEdit(active)}
           userId={session.user.id}
+          onNoteSaved={(topicId, content) => setNotesByTopicId(prev => ({ ...prev, [topicId]: content }))}
+          notesFocusOnOpen={notesSearchTrigger === active.id}
+          notesHighlightQuery={notesSearchTrigger === active.id ? trimmedQuery : ""}
         />
       )}
 
@@ -964,11 +1072,25 @@ function Hub({ session, profile }) {
 // ---------- Topic viewer (slides + quiz) ----------
 
 // ---------- Personal notes ----------
-// Private per-user, per-topic notebook. Autosaves 1s after typing stops, never on a
-// timer/interval while the user is actively typing, and flushes any unsaved change
-// immediately if the topic is closed (or a different topic is opened) before that
-// 1s window elapses.
-function NotesSection({ userId, topicId }) {
+// Drives one private, per-user, per-topic autosaving text field against any "notes"-
+// shaped table (id, user_id, topic_id, content, updated_at). Shared by Notes and
+// Questions so both get identical, battle-tested save behavior:
+//
+// Autosaves 1s after typing stops, never on a timer/interval while the user is actively
+// typing, and flushes any unsaved change immediately if the topic is closed (or a
+// different topic is opened) before that 1s window elapses.
+//
+// Saves are serialized through a single promise chain (`saveChainRef`) so they always
+// reach the table in the order they were queued — never two in flight at once, so an
+// older request can never resolve after (and overwrite) a newer one. Each queued step
+// reads the *current* `contentRef.current` at the moment it actually runs (not a
+// snapshot taken when it was scheduled), so by the time an earlier-queued step executes
+// it's already saving the latest text; `lastSavedRef.current` is only ever updated after
+// the write is confirmed, so a failed save can never be mistaken for a saved one.
+//
+// `onSaved(topicId, content)` fires only after a confirmed successful save — Notes uses
+// this to keep Hub's local search index fresh instantly, with no refetch or polling.
+function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topicId, onSaved }) {
   const [content, setContent] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [status, setStatus] = useState("idle"); // "idle" | "saving" | "saved" | "error"
@@ -977,6 +1099,13 @@ function NotesSection({ userId, topicId }) {
   const lastSavedRef = useRef("");
   const timerRef = useRef(null);
   const textareaRef = useRef(null);
+  const saveChainRef = useRef(Promise.resolve());
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const resize = (el) => {
     if (!el) return;
@@ -984,7 +1113,7 @@ function NotesSection({ userId, topicId }) {
     el.style.height = Math.max(el.scrollHeight, 180) + "px";
   };
 
-  // Load this topic's note whenever the topic changes.
+  // Load this topic's row whenever the topic changes.
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
@@ -993,15 +1122,16 @@ function NotesSection({ userId, topicId }) {
     contentRef.current = "";
     lastSavedRef.current = "";
     setLastSavedAt(null);
+    saveChainRef.current = Promise.resolve(); // fresh queue for this topic
     (async () => {
       try {
-        const note = await fetchNote(userId, topicId);
+        const row = await fetchEntry(userId, topicId);
         if (cancelled) return;
-        const text = note?.content || "";
+        const text = row?.content || "";
         setContent(text);
         contentRef.current = text;
         lastSavedRef.current = text;
-        if (note?.updated_at) { setLastSavedAt(new Date(note.updated_at)); setStatus("saved"); }
+        if (row?.updated_at) { setLastSavedAt(new Date(row.updated_at)); setStatus("saved"); }
       } catch {
         // Editor stays usable even if the initial fetch fails — just no "Saved" timestamp yet.
       } finally {
@@ -1009,27 +1139,51 @@ function NotesSection({ userId, topicId }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [userId, topicId]);
+  }, [table, userId, topicId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { resize(textareaRef.current); }, [content, loaded]);
 
+  // Appends one save attempt to the end of the chain. Because it's chained off the
+  // previous step's promise, it can't start until every earlier-queued save has fully
+  // settled — that's what guarantees in-order delivery with no overlap. Reading
+  // contentRef.current here (rather than capturing `text` at call time) means this step
+  // always saves whatever is truly current by the time its turn comes up.
+  const enqueueSave = () => {
+    saveChainRef.current = saveChainRef.current.then(async () => {
+      const text = contentRef.current;
+      if (text === lastSavedRef.current) return; // nothing new since the last confirmed save
+      if (mountedRef.current) setStatus("saving");
+      try {
+        await upsertEntry(userId, topicId, text);
+        lastSavedRef.current = text; // only advance this on confirmed success
+        if (mountedRef.current) {
+          setLastSavedAt(new Date());
+          setStatus("saved");
+        }
+        if (onSaved) onSaved(topicId, text);
+      } catch {
+        // Leave lastSavedRef untouched so this content is still considered "unsaved" —
+        // the next edit (or the next flush) will naturally retry it.
+        if (mountedRef.current) setStatus("error");
+      }
+    });
+    return saveChainRef.current;
+  };
+
   // Saves immediately, skipping the debounce — used when leaving the topic and when a
-  // pending debounce needs to be superseded. Never writes if nothing actually changed.
+  // pending debounce needs to be superseded. Goes through the same serialized queue, so
+  // it can never race ahead of (or be overwritten by) an already-queued save.
   const flush = () => {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
-    if (contentRef.current !== lastSavedRef.current) {
-      const toSave = contentRef.current;
-      lastSavedRef.current = toSave;
-      upsertNote(userId, topicId, toSave).catch(() => {});
-    }
+    enqueueSave();
   };
 
   // Flush on topic switch / close (cleanup runs when userId/topicId change AND on unmount),
-  // so notes typed right before leaving the topic are never lost.
+  // so edits typed right before leaving the topic are never lost.
   useEffect(() => {
     return () => { flush(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, topicId]);
+  }, [table, userId, topicId]);
 
   function handleChange(e) {
     const text = e.target.value;
@@ -1037,37 +1191,66 @@ function NotesSection({ userId, topicId }) {
     contentRef.current = text;
     if (!loaded) return;
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(async () => {
+    timerRef.current = setTimeout(() => {
       timerRef.current = null;
-      if (text === lastSavedRef.current) return;
-      setStatus("saving");
-      try {
-        await upsertNote(userId, topicId, text);
-        lastSavedRef.current = text;
-        setLastSavedAt(new Date());
-        setStatus("saved");
-      } catch {
-        setStatus("error");
-      }
+      enqueueSave();
     }, 1000);
   }
 
+  return { content, loaded, status, lastSavedAt, textareaRef, handleChange };
+}
+
+// Shared presentational card for a private autosaving text field (Notes, Questions, …).
+// `highlightQuery`/`overlayRef`/`onScroll` are optional — only Notes currently uses them
+// (driven by global search); omitting them renders a plain textarea, unchanged.
+function AutosaveTextCard({
+  icon, title, subtitle, content, loaded, status, lastSavedAt, textareaRef, onChange,
+  placeholderLoaded, placeholderLoading, highlightQuery, overlayRef, onScroll,
+}) {
+  const activeHighlightQuery = loaded && highlightQuery ? highlightQuery : "";
+  const sharedFieldStyle = {
+    gridArea: "1 / 1 / 2 / 2",
+    width: "100%", boxSizing: "border-box", minHeight: 180,
+    padding: "12px 14px", fontSize: 14, lineHeight: 1.6, fontFamily: font,
+    whiteSpace: "pre-wrap", overflowWrap: "break-word",
+  };
+
   return (
     <div style={{ marginTop: 24, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "18px 20px" }}>
-      <h4 style={{ fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>📝 My Notes</h4>
-      <p style={{ fontSize: 12, color: BRAND.teal, margin: "0 0 12px" }}>These notes are private and only visible to you.</p>
-      <textarea
-        ref={textareaRef}
-        value={content}
-        onChange={handleChange}
-        disabled={!loaded}
-        placeholder="Jot down anything you'd like to remember about this topic…"
-        style={{
-          width: "100%", boxSizing: "border-box", minHeight: 180, resize: "none", overflow: "hidden",
-          border: `1px solid ${BRAND.sandBorder}`, borderRadius: 10, padding: "12px 14px",
-          fontSize: 14, lineHeight: 1.6, color: BRAND.darkTeal, background: BRAND.white, fontFamily: font,
-        }}
-      />
+      <h4 style={{ fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>{icon} {title}</h4>
+      <p style={{ fontSize: 12, color: BRAND.teal, margin: "0 0 12px" }}>{subtitle}</p>
+      <div style={{ position: "relative", display: "grid" }}>
+        {activeHighlightQuery && (
+          <div
+            ref={overlayRef}
+            aria-hidden="true"
+            style={{
+              ...sharedFieldStyle,
+              borderRadius: 10, border: "1px solid transparent",
+              color: BRAND.darkTeal, background: BRAND.white,
+              overflow: "hidden", pointerEvents: "none",
+            }}
+          >
+            {highlightText(content, activeHighlightQuery)}
+          </div>
+        )}
+        <textarea
+          ref={textareaRef}
+          value={content}
+          onChange={onChange}
+          onScroll={onScroll}
+          disabled={!loaded}
+          placeholder={loaded ? placeholderLoaded : placeholderLoading}
+          style={{
+            ...sharedFieldStyle,
+            resize: "none", overflow: "hidden",
+            border: `1px solid ${BRAND.sandBorder}`, borderRadius: 10,
+            color: activeHighlightQuery ? "transparent" : BRAND.darkTeal,
+            caretColor: BRAND.darkTeal,
+            background: activeHighlightQuery ? "transparent" : BRAND.white,
+          }}
+        />
+      </div>
       <div style={{ marginTop: 8, fontSize: 12, color: BRAND.teal, minHeight: 16, display: "flex", alignItems: "center", gap: 6 }}>
         {status === "saving" && <><Loader2 size={12} className="animate-spin" /> Saving…</>}
         {status === "saved" && lastSavedAt && <><Check size={12} /> Saved {formatSavedTime(lastSavedAt)}</>}
@@ -1077,8 +1260,70 @@ function NotesSection({ userId, topicId }) {
   );
 }
 
+// `onSaved(topicId, content)` lets the parent (Hub) keep its local search index of
+// notes fresh the instant a save succeeds — no refetch, no polling.
+// `focusOnOpen` / `highlightQuery` are only set when this topic was opened by clicking
+// a global-search result that matched inside "My Notes"; otherwise the section behaves
+// exactly as a plain autosaving textarea.
+function NotesSection({ userId, topicId, onSaved, focusOnOpen, highlightQuery }) {
+  const { content, loaded, status, lastSavedAt, textareaRef, handleChange } = usePrivateAutosaveField({
+    table: "notes", fetchEntry: fetchNote, upsertEntry: upsertNote, userId, topicId, onSaved,
+  });
+  const overlayRef = useRef(null);
+  const scrolledRef = useRef(false);
 
-function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId }) {
+  useEffect(() => { scrolledRef.current = false; }, [topicId]);
+
+  // Scroll to and focus the notes editor once — only after the topic's note has
+  // actually finished loading, and only when this open came from a "My Notes" search match.
+  useEffect(() => {
+    if (loaded && focusOnOpen && !scrolledRef.current && textareaRef.current) {
+      scrolledRef.current = true;
+      textareaRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+      textareaRef.current.focus();
+    }
+  }, [loaded, focusOnOpen, textareaRef]);
+
+  // Keep the (non-interactive) highlight overlay's scroll position in lockstep with the
+  // real textarea, in case content ever exceeds the visible area.
+  const handleScroll = (e) => {
+    if (overlayRef.current) overlayRef.current.scrollTop = e.target.scrollTop;
+  };
+
+  return (
+    <AutosaveTextCard
+      icon="📝" title="My Notes" subtitle="These notes are private and only visible to you."
+      content={content} loaded={loaded} status={status} lastSavedAt={lastSavedAt}
+      textareaRef={textareaRef} onChange={handleChange}
+      placeholderLoaded="Jot down anything you'd like to remember about this topic…"
+      placeholderLoading="Loading your notes…"
+      highlightQuery={highlightQuery} overlayRef={overlayRef} onScroll={handleScroll}
+    />
+  );
+}
+
+// A private space to jot down questions to bring to a trainer/Team Leader later — kept in
+// its own `questions` table (separate from Notes) specifically so a future "share with my
+// trainer/TL" feature can add its own visibility rules without touching Notes at all.
+// For now it's fully private, same as Notes, and not part of global search.
+function QuestionsSection({ userId, topicId }) {
+  const { content, loaded, status, lastSavedAt, textareaRef, handleChange } = usePrivateAutosaveField({
+    table: "questions", fetchEntry: fetchQuestion, upsertEntry: upsertQuestion, userId, topicId,
+  });
+
+  return (
+    <AutosaveTextCard
+      icon="❓" title="My Questions" subtitle="Private space to note things you'd like to ask your trainer or Team Leader later. Only visible to you."
+      content={content} loaded={loaded} status={status} lastSavedAt={lastSavedAt}
+      textareaRef={textareaRef} onChange={handleChange}
+      placeholderLoaded={'e.g. "How does private domain registration actually work?"'}
+      placeholderLoading="Loading your questions…"
+    />
+  );
+}
+
+
+function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, onNoteSaved, notesFocusOnOpen, notesHighlightQuery }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState({});
@@ -1140,19 +1385,6 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
                 <button disabled={slideIdx === topic.slides.length - 1} onClick={() => setSlideIdx(i => Math.min(topic.slides.length - 1, i + 1))} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "6px 12px", color: slideIdx === topic.slides.length - 1 ? "#B7BDC0" : BRAND.darkTeal, display: "flex", alignItems: "center", gap: 4, fontSize: 13 }}>Next <ChevronRight size={14} /></button>
               </div>
 
-              {topic.ticketLinks && topic.ticketLinks.length > 0 && (
-                <div style={{ marginTop: 24 }}>
-                  <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: BRAND.teal, marginBottom: 10, fontWeight: 700 }}>Related tickets</h4>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {topic.ticketLinks.map((l, i) => (
-                      <a key={i} href={l.url} target="_blank" rel="noreferrer" style={{ color: BRAND.teal, fontSize: 14, display: "flex", alignItems: "center", gap: 6, textDecoration: "none", fontWeight: 500 }}>
-                        <TicketCheck size={13} /> {l.label || l.url} <ExternalLink size={11} style={{ opacity: 0.6 }} />
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               {topic.links.length > 0 && (
                 <div style={{ marginTop: 24 }}>
                   <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: BRAND.teal, marginBottom: 10, fontWeight: 700 }}>Links and resources</h4>
@@ -1160,6 +1392,19 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
                     {topic.links.map((l, i) => (
                       <a key={i} href={l.url} target="_blank" rel="noreferrer" style={{ color: BRAND.teal, fontSize: 14, display: "flex", alignItems: "center", gap: 6, textDecoration: "none", fontWeight: 500 }}>
                         <Link2 size={13} /> {l.label || l.url} <ExternalLink size={11} style={{ opacity: 0.6 }} />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {topic.ticketLinks && topic.ticketLinks.length > 0 && (
+                <div style={{ marginTop: 24 }}>
+                  <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: BRAND.teal, marginBottom: 10, fontWeight: 700 }}>Related tickets</h4>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {topic.ticketLinks.map((l, i) => (
+                      <a key={i} href={l.url} target="_blank" rel="noreferrer" style={{ color: BRAND.teal, fontSize: 14, display: "flex", alignItems: "center", gap: 6, textDecoration: "none", fontWeight: 500 }}>
+                        <TicketCheck size={13} /> {l.label || l.url} <ExternalLink size={11} style={{ opacity: 0.6 }} />
                       </a>
                     ))}
                   </div>
@@ -1186,7 +1431,12 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
                 </button>
               )}
 
-              <NotesSection userId={userId} topicId={topic.id} />
+              <NotesSection
+                userId={userId} topicId={topic.id} onSaved={onNoteSaved}
+                focusOnOpen={notesFocusOnOpen} highlightQuery={notesHighlightQuery}
+              />
+
+              <QuestionsSection userId={userId} topicId={topic.id} />
             </>
           )}
 
@@ -1365,22 +1615,6 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
           </div>
 
           <div>
-            <label style={labelStyle}>Related customer care tickets</label>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {(draft.ticketLinks || []).map((l, i) => (
-                <div key={i} style={{ display: "flex", gap: 8 }}>
-                  <input style={{ ...inputStyle, flex: "0 0 40%" }} placeholder="e.g. Ticket #4821 — refund dispute" value={l.label} onChange={e => updateTicketLink(i, "label", e.target.value)} />
-                  <input style={inputStyle} placeholder="https://..." value={l.url} onChange={e => updateTicketLink(i, "url", e.target.value)} />
-                  <button onClick={() => removeTicketLink(i)} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", color: "#C0392B" }}><Trash2 size={14} /></button>
-                </div>
-              ))}
-              <button onClick={addTicketLink} className="onb-btn" style={{ background: "transparent", border: `1px dashed ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px", color: BRAND.teal, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-                <Plus size={14} /> Add related ticket
-              </button>
-            </div>
-          </div>
-
-          <div>
             <label style={labelStyle}>Links to manuals and internal resources</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {draft.links.map((l, i) => (
@@ -1392,6 +1626,22 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
               ))}
               <button onClick={addLink} className="onb-btn" style={{ background: "transparent", border: `1px dashed ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px", color: BRAND.teal, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
                 <Plus size={14} /> Add link
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label style={labelStyle}>Related customer care tickets</label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {(draft.ticketLinks || []).map((l, i) => (
+                <div key={i} style={{ display: "flex", gap: 8 }}>
+                  <input style={{ ...inputStyle, flex: "0 0 40%" }} placeholder="e.g. Ticket #4821 — refund dispute" value={l.label} onChange={e => updateTicketLink(i, "label", e.target.value)} />
+                  <input style={inputStyle} placeholder="https://..." value={l.url} onChange={e => updateTicketLink(i, "url", e.target.value)} />
+                  <button onClick={() => removeTicketLink(i)} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", color: "#C0392B" }}><Trash2 size={14} /></button>
+                </div>
+              ))}
+              <button onClick={addTicketLink} className="onb-btn" style={{ background: "transparent", border: `1px dashed ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px", color: BRAND.teal, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                <Plus size={14} /> Add related ticket
               </button>
             </div>
           </div>
