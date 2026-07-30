@@ -79,65 +79,155 @@ const ICON_PICKER_ORDER = [
   "alertTriangle", "star", "zap", "bell", "mapPin", "award", "lightbulb", "file",
 ];
 
+// ---------- Topic categories ----------
+// Registry-driven so the homepage can render one section per category without any
+// hardcoded "if getting_started render X, if product render Y" branching. Adding a
+// third section later (Internal Processes, Sales, Technical, …) is just adding an entry
+// here — the grouping/rendering logic below needs no changes.
+const TOPIC_CATEGORIES = [
+  { key: "getting_started", emoji: "🚀", label: "Getting Started", description: "Everything you need during your first days at Webnode." },
+  { key: "product", emoji: "📚", label: "Product Academy", description: "Build your product knowledge and customer support skills." },
+];
+const TOPIC_CATEGORY_MAP = Object.fromEntries(TOPIC_CATEGORIES.map(c => [c.key, c]));
+const DEFAULT_TOPIC_CATEGORY = "product";
+
+function getTopicCategory(topic) {
+  return topic?.category || DEFAULT_TOPIC_CATEGORY;
+}
+
+// Turns "sales_enablement" into "Sales Enablement" — used so a category that hasn't been
+// added to TOPIC_CATEGORIES yet (e.g. set directly in the database) still gets a readable
+// section heading instead of breaking or being silently dropped from the homepage.
+function humanizeCategoryKey(key) {
+  return key.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// Groups a flat topic list into ordered sections: known categories first (in the order
+// declared in TOPIC_CATEGORIES), then any other category present in the data, in the
+// order it was first encountered. Categories with zero topics (e.g. filtered out by
+// search) simply produce no section — callers don't need to special-case "empty".
+function groupTopicsIntoSections(topicsList) {
+  const byCategory = {};
+  const encounterOrder = [];
+  topicsList.forEach(t => {
+    const key = getTopicCategory(t);
+    if (!byCategory[key]) { byCategory[key] = []; encounterOrder.push(key); }
+    byCategory[key].push(t);
+  });
+
+  const sections = [];
+  const used = new Set();
+  TOPIC_CATEGORIES.forEach(cat => {
+    if (byCategory[cat.key]?.length) {
+      sections.push({ ...cat, topics: byCategory[cat.key] });
+      used.add(cat.key);
+    }
+  });
+  encounterOrder.forEach(key => {
+    if (used.has(key)) return;
+    sections.push({ key, emoji: "📁", label: humanizeCategoryKey(key), description: "More learning topics.", topics: byCategory[key] });
+  });
+  return sections;
+}
+
+// One topic card — used inside every category section. Kept as its own component so the
+// section-rendering loop below stays simple regardless of how many sections there are.
+function TopicCard({ topic: t, done, editMode, trimmedQuery, notesByTopicId, onOpen, onEdit }) {
+  const match = trimmedQuery ? getTopicMatch(t, trimmedQuery, notesByTopicId) : null;
+  const otherMatches = match ? match.filter(f => f.key !== "title" && f.key !== "description").map(f => f.label) : [];
+  const matchedNotes = !!(match && match.some(f => f.key === "notes"));
+
+  return (
+    <div className="onb-card" onClick={() => onOpen(matchedNotes)} style={{ background: done ? BRAND.limeSoft : BRAND.white, border: `1px solid ${done ? "rgba(183,239,135,0.6)" : BRAND.sandBorder}`, borderTop: `3px solid ${done ? BRAND.lime : BRAND.teal}`, borderRadius: 12, padding: "20px 20px 18px", position: "relative" }}>
+      {editMode && (
+        <button onClick={(e) => { e.stopPropagation(); onEdit(); }} className="onb-btn" style={{ position: "absolute", top: 12, right: 12, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: 5, color: BRAND.teal }}>
+          <Pencil size={13} />
+        </button>
+      )}
+      {done && (
+        <div style={{ position: "absolute", top: 12, right: editMode ? 42 : 12, width: 22, height: 22, borderRadius: "50%", background: BRAND.lime, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Check size={13} color={BRAND.darkTeal} />
+        </div>
+      )}
+      <TopicIcon topic={t} />
+      <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{trimmedQuery ? highlightText(t.title, trimmedQuery) : t.title}</h3>
+      <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{trimmedQuery ? highlightText(t.description, trimmedQuery) : t.description}</p>
+      <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal }}>
+        <Clock size={12} /> {formatMinutes(getEstimatedTime(t))}
+      </div>
+      {otherMatches.length > 0 && (
+        <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 6, padding: "3px 8px" }}>
+          <Search size={11} /> Matches in {otherMatches.join(", ")}
+        </div>
+      )}
+      {t.quiz && t.quiz.length > 0 && (
+        <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.darkTeal, background: BRAND.limeSoft, borderRadius: 6, padding: "3px 8px", fontWeight: 700 }}>
+          <Zap size={11} /> Quiz
+        </div>
+      )}
+    </div>
+  );
+}
+
 const DEFAULT_TOPICS = [
-  { id: "search-tickets", estimatedTime: 6, icon: "search", order: 1,
+  { id: "search-tickets", category: "product", estimatedTime: 6, icon: "search", order: 1,
     title: "Search tickets", description: "Browse and filter Freshdesk tickets by month, agent, and reason.",
     slides: [
       { id: "s1", title: "What it's for", bullets: ["- Find tickets that need evaluating", "- Filter by month, agent, or contact reason", "- Already-evaluated tickets are flagged"] },
       { id: "s2", title: "Walkthrough", bullets: ["- Add the real steps here", "- Click Edit content to replace this slide"] },
     ],
     links: [], ticketLinks: [], tips: ["Add a practical tip for new hires here."], quiz: [] },
-  { id: "ticket-evaluation", estimatedTime: 8, icon: "clipboardCheck", order: 2,
+  { id: "ticket-evaluation", category: "product", estimatedTime: 8, icon: "clipboardCheck", order: 2,
     title: "Ticket evaluation", description: "Evaluate a ticket with a decision tree — quality, root cause, and improvement ideas.",
     slides: [
       { id: "s1", title: "How it works", bullets: ["- Decision tree: how the ticket was resolved", "- Quality and root cause are picked step by step", "- Score is calculated automatically"] },
     ],
     links: [], ticketLinks: [], tips: ["Add a practical tip for new hires here."], quiz: [] },
-  { id: "view-results", estimatedTime: 6, icon: "chart", order: 3,
+  { id: "view-results", category: "product", estimatedTime: 6, icon: "chart", order: 3,
     title: "View results", description: "Evaluations by quarter, team, and agent — scores, root causes, calibration flags.",
     slides: [ { id: "s1", title: "What's in here", bullets: ["- Filter by quarter, team, agent", "- Score and trend overview", "- Calibration flags"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "calibration-queue", estimatedTime: 5, icon: "target", order: 4,
+  { id: "calibration-queue", category: "product", estimatedTime: 5, icon: "target", order: 4,
     title: "Calibration queue", description: "Tickets flagged for calibration, waiting for a group review.",
     slides: [ { id: "s1", title: "How calibration works", bullets: ["- Tickets wait for a team discussion", "- Mark them calibrated once discussed"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "csat-report", estimatedTime: 6, icon: "smile", order: 5,
+  { id: "csat-report", category: "product", estimatedTime: 6, icon: "smile", order: 5,
     title: "CSAT report", description: "Customer satisfaction stats, top agents, and detailed feedback by period.",
     slides: [ { id: "s1", title: "Overview", bullets: ["- CSAT stats by period", "- Top agents", "- Detailed feedback analysis"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "team-management", estimatedTime: 7, icon: "users", order: 6,
+  { id: "team-management", category: "product", estimatedTime: 7, icon: "users", order: 6,
     title: "Team management", description: "Create and manage teams, add agents, organize the support structure.",
     slides: [ { id: "s1", title: "What you manage here", bullets: ["- Create and edit teams", "- Add agents", "- Support org structure"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "import-legacy", estimatedTime: 8, icon: "uploadCloud", order: 7,
+  { id: "import-legacy", category: "product", estimatedTime: 8, icon: "uploadCloud", order: 7,
     title: "Import legacy data", description: "Import evaluations from the old system by pasting Excel table data.",
     slides: [ { id: "s1", title: "How to import", bullets: ["- Paste data copied from Excel", "- Review and confirm the import"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "freshdesk-import", estimatedTime: 7, icon: "sync", order: 8,
+  { id: "freshdesk-import", category: "product", estimatedTime: 7, icon: "sync", order: 8,
     title: "Freshdesk import", description: "Import ticket data directly from Freshdesk exports for evaluation.",
     slides: [ { id: "s1", title: "How it works", bullets: ["- Upload a Freshdesk export", "- Data gets prepped for evaluation"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "export-data", estimatedTime: 5, icon: "downloadCloud", order: 9,
+  { id: "export-data", category: "product", estimatedTime: 5, icon: "downloadCloud", order: 9,
     title: "Export data", description: "Export evaluated tickets to CSV, Excel, or JSON, with optional date filtering.",
     slides: [ { id: "s1", title: "Export formats", bullets: ["- CSV, Excel, JSON", "- Optional date filtering"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "access-log", estimatedTime: 5, icon: "shieldCheck", order: 10,
+  { id: "access-log", category: "product", estimatedTime: 5, icon: "shieldCheck", order: 10,
     title: "Access log", description: "Login and logout activity, IP addresses, and unauthorized access attempts.",
     slides: [ { id: "s1", title: "What to watch for", bullets: ["- Login and logout history", "- IP addresses", "- Unauthorized access attempts"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "changelog", estimatedTime: 4, icon: "history", order: 11,
+  { id: "changelog", category: "product", estimatedTime: 4, icon: "history", order: 11,
     title: "Changelog", description: "Recent updates, bug fixes, and new features added to the system.",
     slides: [ { id: "s1", title: "What it's for", bullets: ["- History of system changes", "- New features and fixes"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "debug", estimatedTime: 6, icon: "wrench", order: 12,
+  { id: "debug", category: "product", estimatedTime: 6, icon: "wrench", order: 12,
     title: "Debug", description: "Inspect data paths, write permissions, JSON integrity, and record counts.",
     slides: [ { id: "s1", title: "When to use it", bullets: ["- Diagnose data issues", "- Check permissions and file integrity"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "migration", estimatedTime: 9, icon: "package", order: 13,
+  { id: "migration", category: "product", estimatedTime: 9, icon: "package", order: 13,
     title: "Migration", description: "One-shot: move old evaluations into the archive and set up the new store.",
     slides: [ { id: "s1", title: "What it does", bullets: ["- Moves old data into the archive", "- Initializes the new evaluations store"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "life-at-webnode", estimatedTime: 8, icon: "mapPin", order: 14,
+  { id: "life-at-webnode", category: "getting_started", estimatedTime: 8, icon: "mapPin", order: 103,
     title: "Life at Webnode", description: "How everyday life, support, and culture work here — who to ask, where things are, and how we work together.",
     slides: [
       { id: "s1", title: "Your support network", bullets: [
@@ -187,6 +277,63 @@ const DEFAULT_TOPICS = [
       ] },
     ],
     links: [], ticketLinks: [], tips: ["No question is too small — asking early saves time for everyone later."], quiz: [] },
+
+  // ---- Getting Started (onboarding/company knowledge) — placeholder content ----
+  { id: "welcome-to-webnode", category: "getting_started", estimatedTime: 5, icon: "smile", order: 101,
+    title: "Welcome to Webnode", description: "A quick introduction to who we are and what to expect from your first days.",
+    slides: [
+      { id: "s1", title: "Welcome", bullets: [
+        "Welcome to the team! This topic is a placeholder — an editor will fill in the real welcome content here.",
+        "- Add a short intro to Webnode as a company",
+        "- Add what makes us different and what we're proud of",
+        "- Add a friendly note on what to expect from onboarding",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "onboarding-journey", category: "getting_started", estimatedTime: 5, icon: "target", order: 102,
+    title: "Your Onboarding Journey", description: "What the next few weeks look like, step by step.",
+    slides: [
+      { id: "s1", title: "The journey ahead", bullets: [
+        "Placeholder — add the real onboarding timeline here.",
+        "- Add key milestones (e.g. week 1, week 2, first solo shift)",
+        "- Add what's expected of you at each stage",
+        "- Add where to track your own progress (this Learning Hub!)",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "who-can-help-me", category: "getting_started", estimatedTime: 5, icon: "helpCircle", order: 104,
+    title: "Who Can Help Me?", description: "A quick-reference guide to who to contact for what.",
+    slides: [
+      { id: "s1", title: "Quick reference", bullets: [
+        "Placeholder — add a short quick-reference list here (this can complement the fuller version in Life at Webnode).",
+        "- Add your trainer's name and contact",
+        "- Add your Team Leader's name and contact",
+        "- Add where to find the full support-network breakdown",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "communication-feedback", category: "getting_started", estimatedTime: 5, icon: "messageSquare", order: 105,
+    title: "Communication & Feedback", description: "How we talk to each other, and how feedback works here.",
+    slides: [
+      { id: "s1", title: "How we communicate", bullets: [
+        "Placeholder — add the real content here.",
+        "- Add which channels we use and when (chat, email, calls, standups)",
+        "- Add how and when feedback is given (1:1s, reviews, informal check-ins)",
+        "- Add how to give feedback upward, not just receive it",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "office-practical-info", category: "getting_started", estimatedTime: 5, icon: "mapPin", order: 106,
+    title: "Office & Practical Information", description: "The practical day-to-day details: where things are and how things work.",
+    slides: [
+      { id: "s1", title: "The practical stuff", bullets: [
+        "Placeholder — add the real content here (this can complement Life at Webnode's Kitchen & office slide).",
+        "- Add opening hours, entry/badge info, parking",
+        "- Add remote/hybrid work practicalities if relevant",
+        "- Add who to contact for facilities issues",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
 ];
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -925,6 +1072,16 @@ function Hub({ session, profile }) {
   const totalLearningMinutes = topics ? topics.reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const trimmedQuery = searchQuery.trim();
   const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery, notesByTopicId)) : sorted;
+  // Homepage sections (Getting Started / Product Academy / …), computed dynamically —
+  // see groupTopicsIntoSections. Built from `filtered` so a search still narrows within
+  // each section rather than needing separate search UI per category.
+  const topicSections = groupTopicsIntoSections(filtered);
+  // Position within its own category — not the raw `order` value, since `order` ranges
+  // now vary by category (see DEFAULT_TOPICS) and no longer map 1:1 to "1st, 2nd, 3rd…"
+  // Always computed from the full topic list so it stays correct even mid-search.
+  const activePositionInCategory = active
+    ? sorted.filter(t => getTopicCategory(t) === getTopicCategory(active)).findIndex(t => t.id === active.id) + 1
+    : 1;
   // Every unanswered question, grouped by topic — powers both the dashboard reminder
   // count and the "View questions" review modal.
   const unansweredByTopic = Object.fromEntries(
@@ -941,7 +1098,7 @@ function Hub({ session, profile }) {
   function startEdit(topic) { setEditDraft(JSON.parse(JSON.stringify(topic))); }
   function startNewTopic() {
     setEditDraft({
-      id: "topic-" + uid(), icon: "file",
+      id: "topic-" + uid(), icon: "file", category: DEFAULT_TOPIC_CATEGORY,
       order: (topics?.length || 0) + 1, title: "", description: "", estimatedTime: DEFAULT_ESTIMATED_MINUTES,
       slides: [{ id: uid(), title: "", bullets: [""] }], links: [], ticketLinks: [], tips: [], quiz: [],
     });
@@ -1128,46 +1285,25 @@ function Hub({ session, profile }) {
           </button>
         </div>
       ) : (
-        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "32px 32px 8px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
-            {filtered.map(t => {
-              const done = !!progress[t.id];
-              const match = trimmedQuery ? getTopicMatch(t, trimmedQuery, notesByTopicId) : null;
-              const otherMatches = match ? match.filter(f => f.key !== "title" && f.key !== "description").map(f => f.label) : [];
-              const matchedNotes = !!(match && match.some(f => f.key === "notes"));
-              return (
-                <div key={t.id} className="onb-card" onClick={() => openTopic(t.id, matchedNotes)} style={{ background: done ? BRAND.limeSoft : BRAND.white, border: `1px solid ${done ? "rgba(183,239,135,0.6)" : BRAND.sandBorder}`, borderTop: `3px solid ${done ? BRAND.lime : BRAND.teal}`, borderRadius: 12, padding: "20px 20px 18px", position: "relative" }}>
-                  {editMode && (
-                    <button onClick={(e) => { e.stopPropagation(); startEdit(t); }} className="onb-btn" style={{ position: "absolute", top: 12, right: 12, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: 5, color: BRAND.teal }}>
-                      <Pencil size={13} />
-                    </button>
-                  )}
-                  {done && (
-                    <div style={{ position: "absolute", top: 12, right: editMode ? 42 : 12, width: 22, height: 22, borderRadius: "50%", background: BRAND.lime, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <Check size={13} color={BRAND.darkTeal} />
-                    </div>
-                  )}
-                  <TopicIcon topic={t} />
-                  <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{trimmedQuery ? highlightText(t.title, trimmedQuery) : t.title}</h3>
-                  <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{trimmedQuery ? highlightText(t.description, trimmedQuery) : t.description}</p>
-                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal }}>
-                    <Clock size={12} /> {formatMinutes(getEstimatedTime(t))}
-                  </div>
-                  {otherMatches.length > 0 && (
-                    <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 6, padding: "3px 8px" }}>
-                      <Search size={11} /> Matches in {otherMatches.join(", ")}
-                    </div>
-                  )}
-                  {t.quiz && t.quiz.length > 0 && (
-                    <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.darkTeal, background: BRAND.limeSoft, borderRadius: 6, padding: "3px 8px", fontWeight: 700 }}>
-                      <Zap size={11} /> Quiz
-                    </div>
-                  )}
-                </div>
-              );
-
-            })}
-          </div>
+        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "32px 32px 40px" }}>
+          {topicSections.map(section => (
+            <div key={section.key} style={{ marginBottom: 40 }}>
+              <div style={{ marginBottom: 16 }}>
+                <h2 style={{ fontSize: 19, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>{section.emoji} {section.label}</h2>
+                <p style={{ fontSize: 13.5, color: BRAND.teal, margin: 0 }}>{section.description}</p>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
+                {section.topics.map(t => (
+                  <TopicCard
+                    key={t.id} topic={t} done={!!progress[t.id]} editMode={editMode}
+                    trimmedQuery={trimmedQuery} notesByTopicId={notesByTopicId}
+                    onOpen={matchedNotes => openTopic(t.id, matchedNotes)}
+                    onEdit={() => startEdit(t)}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -1194,6 +1330,7 @@ function Hub({ session, profile }) {
           showToast={showToast}
           linkStatesByUrl={linkStatesByUrl}
           onVisitLink={markLinkVisited}
+          positionInCategory={activePositionInCategory}
         />
       )}
 
@@ -1604,7 +1741,7 @@ function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
 }
 
 
-function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, onNoteSaved, notesFocusOnOpen, notesHighlightQuery, questions, onQuestionsChange, showToast, linkStatesByUrl, onVisitLink }) {
+function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, onNoteSaved, notesFocusOnOpen, notesHighlightQuery, questions, onQuestionsChange, showToast, linkStatesByUrl, onVisitLink, positionInCategory }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState({});
@@ -1628,7 +1765,7 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
       <div onClick={e => e.stopPropagation()} style={{ background: BRAND.white, borderRadius: 16, width: "100%", maxWidth: 720, maxHeight: "88vh", overflowY: "auto", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "20px 24px", borderBottom: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <div style={{ fontSize: 12, color: BRAND.teal, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6, fontWeight: 700 }}>Topic {String(topic.order).padStart(2, "0")}</div>
+            <div style={{ fontSize: 12, color: BRAND.teal, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6, fontWeight: 700 }}>Topic {String(positionInCategory ?? topic.order).padStart(2, "0")}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: BRAND.darkTeal }}>{topic.title}</h2>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 999, padding: "3px 10px" }}>
@@ -1917,7 +2054,7 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
               })}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             <div style={{ width: 90 }}>
               <label style={labelStyle}>Order</label>
               <input type="number" style={inputStyle} value={draft.order} onChange={e => update("order", Number(e.target.value))} />
@@ -1931,6 +2068,21 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                 value={draft.estimatedTime ?? DEFAULT_ESTIMATED_MINUTES}
                 onChange={e => update("estimatedTime", Math.max(1, Number(e.target.value) || DEFAULT_ESTIMATED_MINUTES))}
               />
+            </div>
+            <div style={{ flex: "1 1 180px" }}>
+              <label style={labelStyle}>Section</label>
+              <select
+                style={inputStyle}
+                value={draft.category || DEFAULT_TOPIC_CATEGORY}
+                onChange={e => update("category", e.target.value)}
+              >
+                {TOPIC_CATEGORIES.map(cat => (
+                  <option key={cat.key} value={cat.key}>{cat.emoji} {cat.label}</option>
+                ))}
+                {draft.category && !TOPIC_CATEGORY_MAP[draft.category] && (
+                  <option value={draft.category}>{humanizeCategoryKey(draft.category)}</option>
+                )}
+              </select>
             </div>
           </div>
 
