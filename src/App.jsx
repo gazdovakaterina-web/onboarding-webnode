@@ -85,15 +85,31 @@ const ICON_PICKER_ORDER = [
 // hardcoded "if getting_started render X, if product render Y" branching. Adding a
 // third section later (Internal Processes, Sales, Technical, …) is just adding an entry
 // here — the grouping/rendering logic below needs no changes.
+//
+// `tracksXp` decides whether a category's topics count toward the Product Academy XP
+// bar / Learning Levels, or are tracked as a simple onboarding completion count instead
+// (see categoryTracksXp below). Getting Started is onboarding, not product learning, so
+// it's excluded; everything else defaults to counting (see categoryTracksXp's fallback),
+// so a brand new category added later "just works" as part of learning progress unless
+// explicitly opted out here.
 const TOPIC_CATEGORIES = [
-  { key: "getting_started", emoji: "🚀", label: "Getting Started", description: "Everything you need during your first days at Webnode." },
-  { key: "product", emoji: "📚", label: "Product Academy", description: "Build your product knowledge and customer support skills." },
+  { key: "getting_started", emoji: "🚀", label: "Getting Started", description: "Everything you need during your first days at Webnode.", tracksXp: false },
+  { key: "product", emoji: "📚", label: "Product Academy", description: "Build your product knowledge and customer support skills.", tracksXp: true },
 ];
 const TOPIC_CATEGORY_MAP = Object.fromEntries(TOPIC_CATEGORIES.map(c => [c.key, c]));
 const DEFAULT_TOPIC_CATEGORY = "product";
 
 function getTopicCategory(topic) {
   return topic?.category || DEFAULT_TOPIC_CATEGORY;
+}
+
+// Whether a category's topics count toward Product Academy XP / Learning Levels. A
+// category not found in TOPIC_CATEGORIES (e.g. one set directly in the database, ahead
+// of a code deploy) defaults to `true` — new categories are assumed to be learning
+// content unless explicitly marked as onboarding via `tracksXp: false` above.
+function categoryTracksXp(categoryKey) {
+  const cat = TOPIC_CATEGORY_MAP[categoryKey];
+  return cat ? cat.tracksXp !== false : true;
 }
 
 // Turns "sales_enablement" into "Sales Enablement" — used so a category that hasn't been
@@ -152,8 +168,11 @@ function TopicCard({ topic: t, done, editMode, trimmedQuery, onOpen, onEdit }) {
       <TopicIcon topic={t} />
       <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{trimmedQuery ? highlightText(t.title, trimmedQuery) : t.title}</h3>
       <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{trimmedQuery ? highlightText(t.description, trimmedQuery) : t.description}</p>
-      <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal }}>
-        <Clock size={12} /> {formatMinutes(getEstimatedTime(t))}
+      <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, color: BRAND.teal }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}><Clock size={12} /> {formatMinutes(getEstimatedTime(t))}</span>
+        {categoryTracksXp(getTopicCategory(t)) && (
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><Star size={12} /> {getTopicXp(t)} XP</span>
+        )}
       </div>
       {otherMatches.length > 0 && (
         <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 6, padding: "3px 8px" }}>
@@ -732,6 +751,68 @@ function getEstimatedTime(topic) {
   return Number.isFinite(val) && val > 0 ? Math.round(val) : DEFAULT_ESTIMATED_MINUTES;
 }
 
+// ---------- Learning Points (XP) ----------
+// Product Academy's progress bar is driven by weighted XP rather than a raw topic count
+// or a sum of estimated minutes — a 5-minute topic and a 45-minute topic shouldn't move
+// the bar by the same amount. Getting Started doesn't use XP at all (see
+// categoryTracksXp) — it's tracked as a plain completion count instead.
+//
+// Every topic has an authoritative XP value via getTopicXp() below. If a topic (or an
+// editor, via the topic editor's "XP" field) has set an explicit `xp`, that's used as-is
+// — this is the customization point future work should hook into. Otherwise XP is
+// derived once, at read time, from a bucketed estimated-time default so existing/seeded
+// content doesn't need anyone to go back and manually weight every topic. Nothing else
+// in the app should compute XP from `estimatedTime` directly — always go through
+// getTopicXp(), so "customize XP per topic" stays a one-field data change forever.
+const XP_BUCKETS = [
+  { maxMinutes: 6, xp: 1 },    // small
+  { maxMinutes: 12, xp: 2 },   // medium
+  { maxMinutes: 20, xp: 3 },   // large
+  { maxMinutes: Infinity, xp: 5 }, // complex
+];
+
+function estimateXpFromMinutes(minutes) {
+  const bucket = XP_BUCKETS.find(b => minutes <= b.maxMinutes);
+  return bucket ? bucket.xp : XP_BUCKETS[XP_BUCKETS.length - 1].xp;
+}
+
+function getTopicXp(topic) {
+  const val = topic?.xp;
+  if (Number.isFinite(val) && val > 0) return Math.round(val);
+  return estimateXpFromMinutes(getEstimatedTime(topic));
+}
+
+// ---------- Learning Levels ----------
+// Levels are reached by *percentage* of Product Academy XP completed, not an absolute
+// XP number — that's what keeps them meaningful as the catalog grows from 20 topics to
+// 100+: a level named for "half the catalog" stays "half the catalog" whether that's 40
+// XP or 400 XP, with no threshold retuning needed as content is added.
+//
+// This list is the single place level count, names, emoji, and thresholds live — adding
+// a level, renaming one, or changing a threshold is purely a data change here.
+const LEARNING_LEVELS = [
+  { key: "new-joiner", emoji: "🌱", label: "New Joiner", minPercent: 0 },
+  { key: "explorer", emoji: "🚀", label: "Explorer", minPercent: 15 },
+  { key: "builder", emoji: "🛠️", label: "Builder", minPercent: 35 },
+  { key: "problem-solver", emoji: "💡", label: "Problem Solver", minPercent: 55 },
+  { key: "website-expert", emoji: "⭐", label: "Website Expert", minPercent: 75 },
+  { key: "webnode-master", emoji: "🏆", label: "Webnode Master", minPercent: 100 },
+];
+
+// The highest level whose threshold a given completion percentage has reached.
+function getLearningLevel(percent) {
+  let current = LEARNING_LEVELS[0];
+  for (const level of LEARNING_LEVELS) {
+    if (percent >= level.minPercent) current = level;
+  }
+  return current;
+}
+
+function getLevelIndex(levelKey) {
+  const idx = LEARNING_LEVELS.findIndex(l => l.key === levelKey);
+  return idx === -1 ? 0 : idx;
+}
+
 // under 60 min -> "45 min"; 60 min or more -> "2h 15m" (or "2h" on an exact hour)
 function formatMinutes(totalMinutes) {
   const mins = Math.max(0, Math.round(totalMinutes));
@@ -871,6 +952,20 @@ async function fetchAllLinkStates(userId) {
 async function markLinkState(userId, url, state) {
   const { error } = await supabase.from("link_states")
     .upsert({ user_id: userId, url, state }, { onConflict: "user_id,url,state", ignoreDuplicates: true });
+  if (error) throw error;
+}
+
+// The highest Learning Level milestone this user has already been celebrated for — one
+// row per user. Read once at login; written the moment a *new* level is reached, so the
+// "🎉 Congratulations" banner only ever shows once per level, even across devices/reloads.
+async function fetchMilestoneState(userId) {
+  const { data, error } = await supabase.from("learning_milestones").select("level_key").eq("user_id", userId).maybeSingle();
+  if (error) throw error;
+  return data; // { level_key } | null
+}
+async function upsertMilestoneState(userId, levelKey) {
+  const { error } = await supabase.from("learning_milestones")
+    .upsert({ user_id: userId, level_key: levelKey, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
   if (error) throw error;
 }
 
@@ -1015,15 +1110,24 @@ function Hub({ session, profile }) {
   // fresh instantly by markLinkVisited's optimistic update. Generic on purpose: adding a
   // "bookmarked" state later needs no new state shape, just another entry in each Set.
   const [linkStatesByUrl, setLinkStatesByUrl] = useState({});
+  // The highest Learning Level milestone index this user has already been congratulated
+  // for (see LEARNING_LEVELS) — null until fetched, so the celebration effect below can
+  // tell "haven't loaded yet" apart from "genuinely never celebrated anything".
+  const [highestMilestoneIdx, setHighestMilestoneIdx] = useState(null);
+  // The level currently being celebrated, if any — drives the dismissible "🎉
+  // Congratulations" banner. Cleared on dismiss; the *database* record of having seen it
+  // is written the moment it's detected (not on dismiss), so a refresh never re-shows it.
+  const [celebratingLevel, setCelebratingLevel] = useState(null);
   const toastTimer = useRef(null);
 
   useEffect(() => { loadAll(); }, []);
 
   async function loadAll() {
     try {
-      const [t, p, q, ls] = await Promise.all([
+      const [t, p, q, ls, milestone] = await Promise.all([
         fetchTopics(), fetchProgress(session.user.id),
         fetchAllQuestions(session.user.id), fetchAllLinkStates(session.user.id),
+        fetchMilestoneState(session.user.id),
       ]);
       setTopics(t);
       setProgress(p);
@@ -1036,6 +1140,9 @@ function Hub({ session, profile }) {
         statesByUrl[row.url].add(row.state);
       });
       setLinkStatesByUrl(statesByUrl);
+      // No row yet means this user has never been congratulated for anything — start
+      // them at level 0 (New Joiner) so reaching it is never treated as a "milestone".
+      setHighestMilestoneIdx(milestone ? getLevelIndex(milestone.level_key) : 0);
     } catch (err) {
       showToast(err.message || "Couldn't load data.");
       setTopics([]);
@@ -1135,12 +1242,37 @@ function Hub({ session, profile }) {
 
   const active = topics && activeId ? topics.find(t => t.id === activeId) : null;
   const sorted = topics ? [...topics].sort((a, b) => a.order - b.order) : [];
-  const totalDone = topics ? topics.filter(t => progress[t.id]).length : 0;
   const totalCount = topics ? topics.length : 0;
-  const progressPct = totalCount > 0 ? Math.round((totalDone / totalCount) * 100) : 0;
   const remainingMinutes = topics ? topics.filter(t => !progress[t.id]).reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const totalQuizzes = topics ? topics.reduce((sum, t) => sum + ((t.quiz && t.quiz.length) || 0), 0) : 0;
   const totalLearningMinutes = topics ? topics.reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
+
+  // ---------- Product Academy progress (XP-driven) ----------
+  // Only topics from an XP-tracking category (Product Academy, by default) count toward
+  // the main progress bar / Learning Levels — see categoryTracksXp. Onboarding
+  // categories (Getting Started) are tracked separately, just below.
+  const xpTopics = sorted.filter(t => categoryTracksXp(getTopicCategory(t)));
+  const totalXp = xpTopics.reduce((sum, t) => sum + getTopicXp(t), 0);
+  const completedXp = xpTopics.filter(t => progress[t.id]).reduce((sum, t) => sum + getTopicXp(t), 0);
+  const xpPct = totalXp > 0 ? Math.round((completedXp / totalXp) * 100) : 0;
+  const currentLevel = getLearningLevel(xpPct);
+  const currentLevelIdx = getLevelIndex(currentLevel.key);
+  const nextLevel = LEARNING_LEVELS[currentLevelIdx + 1] || null;
+  // The next not-yet-completed Product Academy topic, in reading order — what "Continue
+  // Learning" jumps to.
+  const nextXpTopic = xpTopics.find(t => !progress[t.id]) || null;
+
+  // ---------- Onboarding progress (Getting Started & friends) ----------
+  // Every non-XP category gets its own simple "X / Y completed" count — generic so a
+  // second onboarding-style category later needs no new code, just tracksXp: false.
+  const onboardingSections = TOPIC_CATEGORIES
+    .filter(cat => !cat.tracksXp)
+    .map(cat => {
+      const catTopics = sorted.filter(t => getTopicCategory(t) === cat.key);
+      return { ...cat, total: catTopics.length, done: catTopics.filter(t => progress[t.id]).length };
+    })
+    .filter(section => section.total > 0);
+
   const trimmedQuery = searchQuery.trim();
   const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery)) : sorted;
   // My Notebook isn't a topic, so it's matched separately and shown alongside these
@@ -1167,6 +1299,25 @@ function Hub({ session, profile }) {
 
   function openTopic(id) { setActiveId(id); setSlideIdx(0); }
   function closeTopic() { setActiveId(null); setSlideIdx(0); }
+  function continueLearning() { if (nextXpTopic) openTopic(nextXpTopic.id); }
+
+  // Fires the "🎉 Congratulations" banner the moment the person's XP crosses into a new
+  // Learning Level they haven't been congratulated for yet — and persists that
+  // immediately (not on dismiss), so it can never show twice. Only compares against
+  // *higher* levels reached, so completing/un-completing topics around a threshold
+  // can't repeatedly re-trigger the same celebration.
+  useEffect(() => {
+    if (!topics || highestMilestoneIdx === null) return;
+    if (currentLevelIdx > highestMilestoneIdx) {
+      setCelebratingLevel(currentLevel);
+      setHighestMilestoneIdx(currentLevelIdx);
+      upsertMilestoneState(session.user.id, currentLevel.key).catch(() => {
+        // Worst case this re-shows once on a future reload — not worth interrupting the
+        // celebration with an error toast over.
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topics, highestMilestoneIdx, currentLevelIdx]);
   function startEdit(topic) { setEditDraft(JSON.parse(JSON.stringify(topic))); }
   function startNewTopic() {
     setEditDraft({
@@ -1290,23 +1441,34 @@ function Hub({ session, profile }) {
                 ))}
               </div>
 
-              {/* Progress summary — compact cards replacing the old plain-text lines */}
-              <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-                <div style={{ flex: "1 1 180px", minWidth: 170, background: "rgba(183,239,135,0.1)", border: "1px solid rgba(183,239,135,0.3)", borderRadius: 12, padding: "12px 14px", textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{ width: 30, height: 30, borderRadius: "50%", background: BRAND.lime, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    <Check size={15} color={BRAND.darkTeal} />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 6 }}>
-                      <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.65)" }}>Progress</div>
-                      <div style={{ fontSize: 11.5, color: BRAND.lime, fontWeight: 700 }}>{progressPct}%</div>
-                    </div>
-                    <div style={{ fontSize: 15, fontWeight: 700 }}>{totalDone} / {totalCount} topics</div>
-                    <div style={{ marginTop: 5, height: 4, borderRadius: 999, background: "rgba(255,255,255,0.15)", overflow: "hidden" }}>
-                      <div style={{ width: `${progressPct}%`, height: "100%", background: BRAND.lime, borderRadius: 999, transition: "width .3s ease" }} />
-                    </div>
+              {/* Product Academy — the main progress panel. Driven by XP, not raw topic
+                  count, so a 5-minute topic and a 45-minute topic don't move the bar by
+                  the same amount (see getTopicXp / LEARNING_LEVELS). */}
+              <div style={{ marginTop: 14, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 14, padding: "18px 20px", textAlign: "left" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 700 }}>📚 Product Academy</div>
+                  <div style={{ fontSize: 12.5, color: BRAND.lime, fontWeight: 700 }}>
+                    {currentLevel.emoji} Level {currentLevelIdx + 1} • {currentLevel.label}
                   </div>
                 </div>
+                <div style={{ marginTop: 12, height: 8, borderRadius: 999, background: "rgba(255,255,255,0.15)", overflow: "hidden" }}>
+                  <div style={{ width: `${xpPct}%`, height: "100%", background: BRAND.lime, borderRadius: 999, transition: "width .3s ease" }} />
+                </div>
+                <div style={{ marginTop: 8, display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>{xpPct}% Complete</div>
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>{completedXp} / {totalXp} XP</div>
+                </div>
+                {nextXpTopic && (
+                  <button onClick={continueLearning} className="onb-btn" style={{ marginTop: 14, background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    Continue Learning <ChevronRight size={14} />
+                  </button>
+                )}
+              </div>
+
+              {/* Secondary stats: overall remaining time, plus one simple completion
+                  count per onboarding category (Getting Started doesn't use XP or a
+                  progress bar — see categoryTracksXp). */}
+              <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
                 <div style={{ flex: "1 1 180px", minWidth: 170, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "12px 14px", textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ width: 30, height: 30, borderRadius: "50%", background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     <Clock size={15} color={BRAND.white} />
@@ -1316,7 +1478,31 @@ function Hub({ session, profile }) {
                     <div style={{ fontSize: 15, fontWeight: 700 }}>{formatMinutes(remainingMinutes)}</div>
                   </div>
                 </div>
+                {onboardingSections.map(section => (
+                  <div key={section.key} style={{ flex: "1 1 180px", minWidth: 170, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "12px 14px", textAlign: "left", display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ width: 30, height: 30, borderRadius: "50%", background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 14 }}>
+                      {section.emoji}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.65)" }}>{section.label}</div>
+                      <div style={{ fontSize: 15, fontWeight: 700 }}>{section.done} / {section.total} completed</div>
+                    </div>
+                  </div>
+                ))}
               </div>
+
+              {/* Milestone celebration — shown once per level (see the effect above),
+                  dismissible, and deliberately understated: no confetti, no modal. */}
+              {celebratingLevel && (
+                <div style={{ marginTop: 14, background: "rgba(183,239,135,0.14)", border: "1px solid rgba(183,239,135,0.4)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, textAlign: "left" }}>
+                  <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>
+                    🎉 <strong>Congratulations!</strong> You've reached <strong>{celebratingLevel.emoji} {celebratingLevel.label}</strong>. Keep going — you're making great progress!
+                  </div>
+                  <button onClick={() => setCelebratingLevel(null)} className="onb-btn" title="Dismiss" style={{ background: "transparent", border: "none", color: "rgba(255,255,255,0.7)", flexShrink: 0, display: "flex" }}>
+                    <X size={15} />
+                  </button>
+                </div>
+              )}
 
               <div style={{ marginTop: 14, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", textAlign: "left" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -2484,6 +2670,22 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                 onChange={e => update("estimatedTime", Math.max(1, Number(e.target.value) || DEFAULT_ESTIMATED_MINUTES))}
               />
             </div>
+            {categoryTracksXp(draft.category || DEFAULT_TOPIC_CATEGORY) && (
+              <div style={{ width: 110 }}>
+                <label style={labelStyle}>XP</label>
+                <input
+                  type="number"
+                  min="1"
+                  style={inputStyle}
+                  placeholder={String(getTopicXp(draft))}
+                  value={draft.xp ?? ""}
+                  onChange={e => {
+                    const raw = e.target.value;
+                    update("xp", raw === "" ? undefined : Math.max(1, Number(raw) || 1));
+                  }}
+                />
+              </div>
+            )}
             <div style={{ flex: "1 1 180px" }}>
               <label style={labelStyle}>Section</label>
               <select
