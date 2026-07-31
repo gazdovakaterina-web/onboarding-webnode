@@ -9,6 +9,7 @@ import {
   Database, FileSpreadsheet, Settings, Lock, ShieldCheck, Bell, MapPin,
   Award, Lightbulb, LogOut, Sparkles,
   Bold, Italic, List, ListOrdered, Heading2, Image as ImageIcon, Link as LinkIcon, Clock,
+  Underline, Quote, Undo, Redo, Heading3, ListTodo,
 } from "lucide-react";
 
 const BRAND = {
@@ -164,6 +165,29 @@ function TopicCard({ topic: t, done, editMode, trimmedQuery, onOpen, onEdit }) {
           <Zap size={11} /> Quiz
         </div>
       )}
+    </div>
+  );
+}
+
+// A search "hit" for My Notebook, shown alongside topic cards on the homepage when the
+// search query matches something inside the notebook. Clicking it opens the Notebook
+// already focused on that match (see openNotebookSearch in Hub).
+function NotebookSearchResult({ query, snippet, onOpen }) {
+  return (
+    <div
+      className="onb-card"
+      onClick={onOpen}
+      style={{ background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderTop: `3px solid ${BRAND.lime}`, borderRadius: 12, padding: "18px 20px", marginBottom: 24, maxWidth: 640 }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, marginBottom: 6 }}>
+        <span aria-hidden="true">📝</span> My Notebook
+      </div>
+      <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.6, margin: 0, fontStyle: "italic" }}>
+        "{highlightText(snippet, query)}"
+      </p>
+      <div style={{ marginTop: 8, fontSize: 12, color: BRAND.teal, display: "inline-flex", alignItems: "center", gap: 4, fontWeight: 600 }}>
+        Open notebook <ChevronRight size={12} />
+      </div>
     </div>
   );
 }
@@ -598,8 +622,9 @@ function FormattingToolbar({ value, onChange, getTextarea }) {
 // Matching is a simple case-insensitive substring match — fast, predictable, and works
 // the same way whether the stored text is plain or uses the markdown syntax above.
 //
-// Personal Notes are a single, topic-independent notebook now (see NotebookPage) and are
-// intentionally not part of this search — there's no per-topic note left to match against.
+// My Notebook is a single, topic-independent document (see NotebookPage) and isn't a
+// per-topic field, so it can't be one of these SEARCH_FIELDS — it's matched separately,
+// via getNotebookSnippet(), and shown alongside these topic results (see Hub).
 const SEARCH_FIELDS = [
   { key: "title", label: "Title" },
   { key: "description", label: "Description" },
@@ -660,6 +685,42 @@ function highlightText(text, query) {
   return nodes;
 }
 
+// ---------- Notebook search helpers ----------
+// The notebook stores rich HTML (see NotebookEditor below). These helpers turn that
+// HTML into plain text so the homepage's global search can match against it and show a
+// short "…context around the match…" preview, without ever needing to parse or render
+// the HTML itself.
+function notebookToPlainText(html) {
+  if (!html) return "";
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  return (div.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+// A notebook counts as empty once tags/whitespace are stripped — this covers both the
+// initial "" and the "<p><br></p>" a browser leaves behind after clearing its content.
+function isNotebookEmpty(html) {
+  return notebookToPlainText(html).length === 0;
+}
+
+// First case-insensitive match of `query` inside the notebook's plain text, with a
+// short window of surrounding context — or null if there's no match at all.
+function getNotebookSnippet(html, query) {
+  const q = (query || "").trim();
+  if (!q) return null;
+  const text = notebookToPlainText(html);
+  const idx = text.toLowerCase().indexOf(q.toLowerCase());
+  if (idx === -1) return null;
+  const radius = 60;
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(text.length, idx + q.length + radius);
+  return (start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 // ---------- Estimated learning time ----------
 // Stored as a plain integer (minutes) inside each topic's jsonb `data`, alongside
 // title/description/slides/etc — no schema change needed. Topics saved before this
@@ -698,6 +759,14 @@ function formatSavedTime(date) {
   yesterday.setDate(now.getDate() - 1);
   if (date.toDateString() === yesterday.toDateString()) return `yesterday at ${time}`;
   return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} at ${time}`;
+}
+
+// "Saved just now" for the first ~45s after a save, then falls back to formatSavedTime's
+// "Saved today at 14:37" style. Purely cosmetic — recomputed each render.
+function formatSavedLabel(date) {
+  if (!date) return "";
+  const seconds = (Date.now() - date.getTime()) / 1000;
+  return seconds < 45 ? "just now" : formatSavedTime(date);
 }
 
 // ---------- Supabase data helpers ----------
@@ -928,10 +997,19 @@ function Hub({ session, profile }) {
   // refetch after every add/answer/delete.
   const [questionsByTopicId, setQuestionsByTopicId] = useState({});
   const [showQuestionsModal, setShowQuestionsModal] = useState(false);
-  // Whether the dedicated Notebook page is open. The Notebook itself is a single
-  // per-user document (see NotebookPage) — it doesn't need to live in Hub's state at
-  // all, since it's fully self-contained once mounted.
+  // Whether the dedicated Notebook page is open. The notebook's *content* itself lives
+  // in the `notebook` hook below (owned here, not inside NotebookPage), so it stays
+  // available to the homepage's global search even while this is false.
   const [showNotebook, setShowNotebook] = useState(false);
+  const notebook = useNotebookAutosave(session.user.id);
+  // Query the Notebook page should open with — set when opening it from a global search
+  // match, so the person lands straight on their highlighted note instead of having to
+  // search again.
+  const [notebookInitialQuery, setNotebookInitialQuery] = useState("");
+  // A pending "insert this topic's heading" request from a topic's "Add note" button —
+  // { text, key }. `key` (not `text`) is what NotebookEditor keys its insert effect off
+  // of, so asking for the same topic twice in a row still triggers a fresh insert.
+  const [notebookHeadingRequest, setNotebookHeadingRequest] = useState(null);
   // Local, per-user index of link resource states — currently only "visited" — for the
   // Links & Resources section: { [url]: Set<string> }. Loaded once after login, kept
   // fresh instantly by markLinkVisited's optimistic update. Generic on purpose: adding a
@@ -982,6 +1060,27 @@ function Hub({ session, profile }) {
     setToast(msg);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 2600);
+  }
+
+  // Opens the Notebook plainly (via the homepage's "Open Notebook" card).
+  function openNotebook() {
+    setNotebookInitialQuery("");
+    setShowNotebook(true);
+  }
+  // Opens the Notebook already focused on a global-search match.
+  function openNotebookSearch(query) {
+    setNotebookInitialQuery(query);
+    setShowNotebook(true);
+  }
+  // Topic helper: opens the Notebook and asks it to insert a heading for this topic.
+  function openNotebookForTopic(title) {
+    setNotebookHeadingRequest({ text: title, key: uid() });
+    setNotebookInitialQuery("");
+    setShowNotebook(true);
+  }
+  function closeNotebook() {
+    setShowNotebook(false);
+    setNotebookHeadingRequest(null);
   }
 
   async function persistTopic(topic) {
@@ -1044,6 +1143,9 @@ function Hub({ session, profile }) {
   const totalLearningMinutes = topics ? topics.reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const trimmedQuery = searchQuery.trim();
   const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery)) : sorted;
+  // My Notebook isn't a topic, so it's matched separately and shown alongside these
+  // topic results rather than being one of them.
+  const notebookSnippet = trimmedQuery ? getNotebookSnippet(notebook.content, trimmedQuery) : null;
   // Homepage sections (Getting Started / Product Academy / …), computed dynamically —
   // see groupTopicsIntoSections. Built from `filtered` so a search still narrows within
   // each section rather than needing separate search UI per category.
@@ -1102,6 +1204,30 @@ function Hub({ session, profile }) {
         .onb-card:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(30,60,71,0.08); }
         .onb-btn { cursor:pointer; font-family: inherit; }
         input, textarea, select { font-family: inherit; }
+
+        .onb-editor { outline: none; }
+        .onb-editor.onb-empty::before {
+          content: attr(data-placeholder);
+          color: ${BRAND.teal};
+          opacity: 0.55;
+          pointer-events: none;
+        }
+        .onb-editor p { margin: 0 0 10px; }
+        .onb-editor h2 { font-size: 1.35em; font-weight: 700; margin: 20px 0 8px; color: ${BRAND.darkTeal}; }
+        .onb-editor h3 { font-size: 1.12em; font-weight: 700; margin: 16px 0 6px; color: ${BRAND.darkTeal}; }
+        .onb-editor blockquote {
+          margin: 10px 0; padding: 4px 16px; border-left: 3px solid ${BRAND.sandBorder};
+          color: ${BRAND.teal}; font-style: italic;
+        }
+        .onb-editor ul, .onb-editor ol { padding-left: 22px; margin: 8px 0; }
+        .onb-editor li { margin: 3px 0; }
+        .onb-editor a { color: ${BRAND.teal}; text-decoration: underline; cursor: pointer; }
+        .onb-editor .onb-checklist { list-style: none; padding-left: 2px; }
+        .onb-editor .onb-checklist li { display: flex; align-items: flex-start; gap: 8px; margin: 5px 0; }
+        .onb-editor .onb-checklist input[type="checkbox"] { margin-top: 4px; cursor: pointer; }
+        .onb-editor .onb-checklist li.onb-checked span { text-decoration: line-through; opacity: 0.5; }
+        mark.onb-search-mark { background: ${BRAND.lime}; color: ${BRAND.darkTeal}; border-radius: 2px; padding: 0 1px; }
+        mark.onb-search-mark.onb-search-mark-current { background: #F5A623; }
       `}</style>
 
       <div style={{ background: BRAND.darkTeal, color: BRAND.white, padding: "40px 32px 32px" }}>
@@ -1205,7 +1331,7 @@ function Hub({ session, profile }) {
                   </div>
                 </div>
                 <button
-                  onClick={() => setShowNotebook(true)}
+                  onClick={openNotebook}
                   className="onb-btn"
                   style={{ background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, flexShrink: 0 }}
                 >
@@ -1268,7 +1394,7 @@ function Hub({ session, profile }) {
             <p style={{ fontSize: 13 }}>Ask an editor to add the first topic.</p>
           )}
         </div>
-      ) : trimmedQuery && filtered.length === 0 ? (
+      ) : trimmedQuery && filtered.length === 0 && !notebookSnippet ? (
         <div style={{ maxWidth: 500, margin: "60px auto", textAlign: "center", color: BRAND.teal }}>
           <p style={{ fontSize: 14, lineHeight: 1.6 }}>No topics match "{searchQuery}".</p>
           <button onClick={() => setSearchQuery("")} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, color: BRAND.teal, borderRadius: 8, padding: "8px 16px", fontSize: 13 }}>
@@ -1277,6 +1403,9 @@ function Hub({ session, profile }) {
         </div>
       ) : (
         <div style={{ maxWidth: 1200, margin: "0 auto", padding: "32px 32px 40px" }}>
+          {trimmedQuery && notebookSnippet && (
+            <NotebookSearchResult query={trimmedQuery} snippet={notebookSnippet} onOpen={() => openNotebookSearch(trimmedQuery)} />
+          )}
           {topicSections.map(section => (
             <div key={section.key} style={{ marginBottom: 40 }}>
               <div style={{ marginBottom: 16 }}>
@@ -1319,11 +1448,18 @@ function Hub({ session, profile }) {
           linkStatesByUrl={linkStatesByUrl}
           onVisitLink={markLinkVisited}
           positionInCategory={activePositionInCategory}
+          onAddNoteForTopic={() => openNotebookForTopic(active.title)}
         />
       )}
 
       {showNotebook && (
-        <NotebookPage userId={session.user.id} onClose={() => setShowNotebook(false)} />
+        <NotebookPage
+          notebook={notebook}
+          onClose={closeNotebook}
+          initialQuery={notebookInitialQuery}
+          insertHeadingRequest={notebookHeadingRequest}
+          onHeadingInserted={() => setNotebookHeadingRequest(null)}
+        />
       )}
 
       {showQuestionsModal && (
@@ -1363,31 +1499,29 @@ function Hub({ session, profile }) {
 // ---------- Topic viewer (slides + quiz) ----------
 
 // ---------- Personal Notebook ----------
-// Drives a single private, per-user autosaving text document against a "notes"-shaped
-// table (id, user_id, content, updated_at) — one row per user, full stop. Originally
-// this also had a per-topic dimension (when notes were split per topic); the Notebook
-// redesign dropped that entirely, which is what simplified this hook.
+// Drives a single private, per-user autosaving *rich-text* document against a
+// "notes"-shaped table (id, user_id, content, updated_at) — one row per user, storing
+// HTML (as produced by NotebookEditor below) instead of the plain text it used to hold.
 //
-// Autosaves 1s after typing stops, never on a timer/interval while the user is actively
-// typing, and flushes any unsaved change immediately if the Notebook page is closed
-// before that 1s window elapses.
+// This hook lives at the Hub level (not inside NotebookPage) rather than only while the
+// Notebook page is open, for one reason: the homepage's global search needs to be able
+// to match against notebook content even while the Notebook itself is closed.
 //
-// Saves are serialized through a single promise chain (`saveChainRef`) so they always
-// reach the table in the order they were queued — never two in flight at once, so an
-// older request can never resolve after (and overwrite) a newer one. Each queued step
-// reads the *current* `contentRef.current` at the moment it actually runs (not a
-// snapshot taken when it was scheduled), so by the time an earlier-queued step executes
-// it's already saving the latest text; `lastSavedRef.current` is only ever updated after
-// the write is confirmed, so a failed save can never be mistaken for a saved one.
-function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, minHeight = 180 }) {
-  const [content, setContent] = useState("");
+// Autosaves 1s after the content changes, never on a timer/interval while the user is
+// actively typing, and can be flushed immediately (skipping the debounce) when the
+// Notebook page closes. Saves are serialized through a single promise chain
+// (`saveChainRef`) so they always reach the table in the order they were made — never
+// two in flight at once, so an older request can never resolve after (and overwrite) a
+// newer one. `lastSavedRef.current` only advances once a write is confirmed, so a failed
+// save can never be mistaken for a saved one.
+function useNotebookAutosave(userId) {
+  const [content, setContentState] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [status, setStatus] = useState("idle"); // "idle" | "saving" | "saved" | "error"
   const [lastSavedAt, setLastSavedAt] = useState(null);
   const contentRef = useRef("");
   const lastSavedRef = useRef("");
   const timerRef = useRef(null);
-  const textareaRef = useRef(null);
   const saveChainRef = useRef(Promise.resolve());
   const mountedRef = useRef(true);
 
@@ -1396,30 +1530,24 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, minHe
     return () => { mountedRef.current = false; };
   }, []);
 
-  const resize = (el) => {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = Math.max(el.scrollHeight, minHeight) + "px";
-  };
-
-  // Load this user's document once.
+  // Load this user's notebook once.
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
     setStatus("idle");
-    setContent("");
+    setContentState("");
     contentRef.current = "";
     lastSavedRef.current = "";
     setLastSavedAt(null);
     saveChainRef.current = Promise.resolve(); // fresh queue
     (async () => {
       try {
-        const row = await fetchEntry(userId);
+        const row = await fetchNotebook(userId);
         if (cancelled) return;
-        const text = row?.content || "";
-        setContent(text);
-        contentRef.current = text;
-        lastSavedRef.current = text;
+        const html = row?.content || "";
+        setContentState(html);
+        contentRef.current = html;
+        lastSavedRef.current = html;
         if (row?.updated_at) { setLastSavedAt(new Date(row.updated_at)); setStatus("saved"); }
       } catch {
         // Editor stays usable even if the initial fetch fails — just no "Saved" timestamp yet.
@@ -1428,55 +1556,50 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, minHe
       }
     })();
     return () => { cancelled = true; };
-  }, [table, userId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => { resize(textareaRef.current); }, [content, loaded]);
+  }, [userId]);
 
   // Appends one save attempt to the end of the chain. Because it's chained off the
   // previous step's promise, it can't start until every earlier-queued save has fully
   // settled — that's what guarantees in-order delivery with no overlap. Reading
-  // contentRef.current here (rather than capturing `text` at call time) means this step
-  // always saves whatever is truly current by the time its turn comes up.
+  // contentRef.current here (rather than capturing a snapshot at call time) means this
+  // step always saves whatever is truly current by the time its turn comes up.
   const enqueueSave = () => {
     saveChainRef.current = saveChainRef.current.then(async () => {
-      const text = contentRef.current;
-      if (text === lastSavedRef.current) return; // nothing new since the last confirmed save
+      const html = contentRef.current;
+      if (html === lastSavedRef.current) return; // nothing new since the last confirmed save
       if (mountedRef.current) setStatus("saving");
       try {
-        await upsertEntry(userId, text);
-        lastSavedRef.current = text; // only advance this on confirmed success
+        await upsertNotebook(userId, html);
+        lastSavedRef.current = html; // only advance this on confirmed success
         if (mountedRef.current) {
+          setContentState(html); // keeps global search reading the latest saved text
           setLastSavedAt(new Date());
           setStatus("saved");
         }
       } catch {
-        // Leave lastSavedRef untouched so this content is still considered "unsaved" —
-        // the next edit (or the next flush) will naturally retry it.
         if (mountedRef.current) setStatus("error");
       }
     });
     return saveChainRef.current;
   };
 
-  // Saves immediately, skipping the debounce — used when the Notebook page closes and a
-  // pending debounce needs to be superseded. Goes through the same serialized queue, so
-  // it can never race ahead of (or be overwritten by) an already-queued save.
+  // Saves immediately, skipping the debounce — used when the Notebook page closes, so a
+  // pending debounce is superseded rather than lost.
   const flush = () => {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     enqueueSave();
   };
 
-  // Flush on unmount (closing the Notebook page), so edits typed right before leaving
-  // are never lost.
-  useEffect(() => {
-    return () => { flush(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [table, userId]);
+  // Updates the Hub-level `content` state right away (rather than waiting for the save
+  // round trip) — called when the Notebook page closes, so global search reflects the
+  // latest text immediately even before the network request settles.
+  const syncNow = () => setContentState(contentRef.current);
 
-  function handleChange(e) {
-    const text = e.target.value;
-    setContent(text);
-    contentRef.current = text;
+  // Called by NotebookEditor on every input. Debounced 1s. Doesn't touch React state on
+  // every keystroke — the editor itself is uncontrolled, so there's no risk of the
+  // cursor jumping while the user types.
+  function handleContentChange(html) {
+    contentRef.current = html;
     if (!loaded) return;
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
@@ -1485,44 +1608,342 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, minHe
     }, 1000);
   }
 
-  return { content, loaded, status, lastSavedAt, textareaRef, handleChange };
+  // Flush any pending save if the whole Hub unmounts (e.g. sign-out) with edits pending.
+  useEffect(() => () => { flush(); }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return { content, loaded, status, lastSavedAt, handleContentChange, flush, syncNow };
 }
 
-// A lightweight per-topic question to-do list — separate from Notes both in intent
-// (things you don't understand yet, to raise with a trainer/TL, vs. things you already
-// know and want to remember) and in storage (its own `questions` table, one row per
-// question). Hub already loads every question the user has, across every topic, once at
-// login — so this component is pure presentation + optimistic mutation, no per-topic
-// fetch and no loading flicker when a topic is opened.
+// ---------- Notebook rich text editor ----------
+// A small, dependency-free contentEditable editor — enough of a "Notion-lite" writing
+// surface (bold/italic/underline, headings, lists, checklists, blockquotes, links,
+// undo/redo) without pulling in a full editor framework. Formatting commands go through
+// the browser's own execCommand, which is deprecated but still broadly supported for
+// exactly this kind of lightweight use.
+//
+// The editor is intentionally uncontrolled: React sets its innerHTML exactly once, the
+// moment the notebook finishes loading (see the hydrate effect below); every keystroke
+// after that is left entirely to the browser. That's what keeps the cursor from ever
+// jumping around while autosave runs in the background.
+function NotebookEditor({ containerRef, content, loaded, searching, onChangeHtml, placeholder, insertHeadingRequest, onHeadingInserted }) {
+  const hydratedRef = useRef(false); // whether innerHTML has been set for this mount yet
+
+  const updateEmptyState = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.classList.toggle("onb-empty", isNotebookEmpty(el.innerHTML));
+  };
+
+  // Hydrate the editor exactly once, the moment the notebook finishes loading.
+  useEffect(() => {
+    if (!loaded || hydratedRef.current || !containerRef.current) return;
+    containerRef.current.innerHTML = content || "";
+    hydratedRef.current = true;
+    updateEmptyState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
+
+  // Topic helper: append a heading for the topic the person came from, then focus it so
+  // they can start typing straight under it.
+  useEffect(() => {
+    if (!insertHeadingRequest || !hydratedRef.current || !containerRef.current) return;
+    const el = containerRef.current;
+    el.focus();
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    if (!isNotebookEmpty(el.innerHTML)) document.execCommand("insertHTML", false, "<p><br></p>");
+    document.execCommand("insertHTML", false, `<h2>${escapeHtml(insertHeadingRequest.text)}</h2><p><br></p>`);
+    updateEmptyState();
+    onChangeHtml(el.innerHTML);
+    onHeadingInserted && onHeadingInserted();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [insertHeadingRequest && insertHeadingRequest.key]);
+
+  function handleInput() {
+    updateEmptyState();
+    onChangeHtml(containerRef.current.innerHTML);
+  }
+
+  function toggleHeading(tag) {
+    const current = (document.queryCommandValue("formatBlock") || "").toUpperCase();
+    document.execCommand("formatBlock", false, current === tag ? "P" : tag);
+  }
+
+  function insertChecklist() {
+    document.execCommand(
+      "insertHTML", false,
+      `<ul class="onb-checklist"><li><input type="checkbox" contenteditable="false"><span>To-do</span></li></ul><p><br></p>`
+    );
+    // Select the placeholder text so the next keystroke replaces it immediately.
+    const spans = containerRef.current.querySelectorAll(".onb-checklist span");
+    const span = spans[spans.length - 1];
+    if (span) {
+      const range = document.createRange();
+      range.selectNodeContents(span);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }
+
+  function insertLink() {
+    const el = containerRef.current;
+    const sel = window.getSelection();
+    const hasSelection = sel && sel.rangeCount > 0 && !sel.getRangeAt(0).collapsed;
+    const url = window.prompt(hasSelection ? "Link URL" : "Link URL (inserted as the link text)");
+    if (!url) return;
+    if (hasSelection) {
+      document.execCommand("createLink", false, url);
+    } else {
+      document.execCommand("insertHTML", false, `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`);
+    }
+    // createLink/insertHTML don't let us set target/rel directly — patch every link
+    // that's missing them right after (cheap: a notebook realistically has a handful).
+    el.querySelectorAll("a:not([target])").forEach(a => {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    });
+  }
+
+  function runCommand(cmd) {
+    const el = containerRef.current;
+    if (!el) return;
+    el.focus();
+    switch (cmd) {
+      case "bold": document.execCommand("bold"); break;
+      case "italic": document.execCommand("italic"); break;
+      case "underline": document.execCommand("underline"); break;
+      case "ul": document.execCommand("insertUnorderedList"); break;
+      case "ol": document.execCommand("insertOrderedList"); break;
+      case "quote": document.execCommand("formatBlock", false, "blockquote"); break;
+      case "h2": toggleHeading("H2"); break;
+      case "h3": toggleHeading("H3"); break;
+      case "checklist": insertChecklist(); break;
+      case "link": insertLink(); break;
+      case "undo": document.execCommand("undo"); break;
+      case "redo": document.execCommand("redo"); break;
+      default: break;
+    }
+    updateEmptyState();
+    onChangeHtml(el.innerHTML);
+  }
+
+  function handleKeyDown(e) {
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod) return;
+    const key = e.key.toLowerCase();
+    if (key === "b") { e.preventDefault(); runCommand("bold"); }
+    else if (key === "i") { e.preventDefault(); runCommand("italic"); }
+    else if (key === "u") { e.preventDefault(); runCommand("underline"); }
+  }
+
+  // Toggle a checklist item's "done" look, and keep the `checked` *attribute* (not just
+  // the DOM property) in sync — that's what survives being read back out of innerHTML.
+  function handleClick(e) {
+    const checkbox = e.target.closest('input[type="checkbox"]');
+    if (checkbox && containerRef.current.contains(checkbox)) {
+      const li = checkbox.closest("li");
+      if (checkbox.checked) { checkbox.setAttribute("checked", "checked"); li && li.classList.add("onb-checked"); }
+      else { checkbox.removeAttribute("checked"); li && li.classList.remove("onb-checked"); }
+      onChangeHtml(containerRef.current.innerHTML);
+      return;
+    }
+    // Links stay editable in place — a plain click opens them (in a new tab) rather
+    // than navigating the whole app away; editing the URL itself is a double-click.
+    const link = e.target.closest("a");
+    if (link && containerRef.current.contains(link)) {
+      e.preventDefault();
+      window.open(link.getAttribute("href"), "_blank", "noopener,noreferrer");
+    }
+  }
+
+  function handleDoubleClick(e) {
+    const link = e.target.closest("a");
+    if (!link || !containerRef.current.contains(link)) return;
+    e.preventDefault();
+    const next = window.prompt("Edit link URL (leave empty to remove the link)", link.getAttribute("href") || "");
+    if (next === null) return;
+    if (next.trim() === "") {
+      link.replaceWith(document.createTextNode(link.textContent));
+    } else {
+      link.setAttribute("href", next.trim());
+    }
+    onChangeHtml(containerRef.current.innerHTML);
+  }
+
+  return (
+    <>
+      <NotebookToolbar onCommand={runCommand} />
+      <div
+        ref={containerRef}
+        className="onb-editor onb-empty"
+        contentEditable={loaded && !searching}
+        suppressContentEditableWarning
+        data-placeholder={placeholder}
+        onInput={handleInput}
+        onKeyDown={handleKeyDown}
+        onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
+        style={{
+          width: "100%", boxSizing: "border-box", minHeight: 420,
+          padding: "6px 22px 20px", fontSize: 15, lineHeight: 1.7, fontFamily: font,
+          color: BRAND.darkTeal, outline: "none", overflowWrap: "break-word",
+        }}
+      />
+    </>
+  );
+}
+
+// Compact, sticky formatting toolbar for NotebookEditor. onMouseDown prevents each
+// button from stealing focus (and therefore the text selection) away from the editor
+// right before its onClick fires the actual command.
+function NotebookToolbar({ onCommand }) {
+  const btnStyle = { background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: "6px 8px", color: BRAND.teal, display: "flex", alignItems: "center", justifyContent: "center" };
+  const dividerStyle = { width: 1, alignSelf: "stretch", background: BRAND.sandBorder, margin: "2px 2px" };
+  const Btn = ({ cmd, title, children }) => (
+    <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => onCommand(cmd)} className="onb-btn" style={btnStyle} title={title}>
+      {children}
+    </button>
+  );
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4, padding: "10px 12px", position: "sticky", top: 0, background: BRAND.white, zIndex: 1, borderBottom: `1px solid ${BRAND.sandBorder}` }}>
+      <Btn cmd="bold" title="Bold (Ctrl/Cmd+B)"><Bold size={14} /></Btn>
+      <Btn cmd="italic" title="Italic (Ctrl/Cmd+I)"><Italic size={14} /></Btn>
+      <Btn cmd="underline" title="Underline (Ctrl/Cmd+U)"><Underline size={14} /></Btn>
+      <div style={dividerStyle} />
+      <Btn cmd="h2" title="Heading 2"><Heading2 size={14} /></Btn>
+      <Btn cmd="h3" title="Heading 3"><Heading3 size={14} /></Btn>
+      <div style={dividerStyle} />
+      <Btn cmd="ul" title="Bullet list"><List size={14} /></Btn>
+      <Btn cmd="ol" title="Numbered list"><ListOrdered size={14} /></Btn>
+      <Btn cmd="checklist" title="Checklist"><ListTodo size={14} /></Btn>
+      <Btn cmd="quote" title="Quote"><Quote size={14} /></Btn>
+      <Btn cmd="link" title="Insert link"><LinkIcon size={14} /></Btn>
+      <div style={dividerStyle} />
+      <Btn cmd="undo" title="Undo (Ctrl/Cmd+Z)"><Undo size={14} /></Btn>
+      <Btn cmd="redo" title="Redo (Ctrl/Cmd+Shift+Z)"><Redo size={14} /></Btn>
+    </div>
+  );
+}
+
 // ---------- Notebook page ----------
-// A single, topic-independent notebook per user — replaces the old per-topic Notes
-// feature entirely. Full-screen "page" (not a small modal) so the editor has room to
-// breathe, reusing the same autosave engine that used to power per-topic Notes.
-function NotebookPage({ userId, onClose }) {
-  const { content, loaded, status, lastSavedAt, textareaRef, handleChange } = usePrivateAutosaveField({
-    table: "notes", fetchEntry: fetchNotebook, upsertEntry: upsertNotebook, userId, minHeight: 420,
-  });
-  const [query, setQuery] = useState("");
-  const overlayRef = useRef(null);
-  const activeQuery = loaded ? query.trim() : "";
+// A single, topic-independent notebook per user — a full-screen "page" (not a small
+// modal) so the editor has room to breathe. `notebook` is the useNotebookAutosave()
+// instance, owned by Hub (not created here) so its content survives the page closing.
+function NotebookPage({ notebook, onClose, initialQuery, insertHeadingRequest, onHeadingInserted }) {
+  const { content, loaded, status, lastSavedAt, handleContentChange, flush } = notebook;
+  const [query, setQuery] = useState(initialQuery || "");
+  const [matchCount, setMatchCount] = useState(0);
+  const [matchIndex, setMatchIndex] = useState(-1);
+  const containerRef = useRef(null);
+  const marksRef = useRef([]);
+  const searching = query.trim().length > 0;
 
-  const handleScroll = (e) => {
-    if (overlayRef.current) overlayRef.current.scrollTop = e.target.scrollTop;
-  };
+  // If the notebook was opened from a homepage search match, jump straight to it.
+  useEffect(() => {
+    if (initialQuery) setQuery(initialQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialQuery]);
 
-  const sharedFieldStyle = {
-    gridArea: "1 / 1 / 2 / 2",
-    width: "100%", boxSizing: "border-box", minHeight: 420,
-    padding: "20px 22px", fontSize: 15, lineHeight: 1.7, fontFamily: font,
-    whiteSpace: "pre-wrap", overflowWrap: "break-word",
-    border: "1px solid transparent", // constant width in both modes so overlay/textarea never drift by a pixel
-  };
+  // A once-a-minute re-render so the "Saved just now" → "Saved today at …" label stays
+  // accurate for as long as the page is left open.
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick(t => t + 1), 20000);
+    return () => clearInterval(id);
+  }, []);
+
+  function clearMarks() {
+    const root = containerRef.current;
+    if (!root) return;
+    root.querySelectorAll("mark.onb-search-mark").forEach(mark => {
+      const parent = mark.parentNode;
+      if (!parent) return;
+      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+      parent.removeChild(mark);
+      parent.normalize();
+    });
+    marksRef.current = [];
+  }
+
+  // Rebuilds the <mark> highlights for the current query. Walks every text node in the
+  // editor and wraps matching substrings — deliberately done as plain DOM surgery
+  // (rather than through React) since the editor's content is otherwise uncontrolled.
+  function rebuildMarks(q) {
+    clearMarks();
+    const root = containerRef.current;
+    if (!root || !q) { setMatchCount(0); setMatchIndex(-1); return; }
+    const lower = q.toLowerCase();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    let n;
+    while ((n = walker.nextNode())) textNodes.push(n);
+
+    const marks = [];
+    textNodes.forEach(node => {
+      const text = node.nodeValue;
+      const lowerText = text.toLowerCase();
+      if (!lowerText.includes(lower)) return;
+      let start = 0, idx;
+      const frag = document.createDocumentFragment();
+      while ((idx = lowerText.indexOf(lower, start)) !== -1) {
+        if (idx > start) frag.appendChild(document.createTextNode(text.slice(start, idx)));
+        const mark = document.createElement("mark");
+        mark.className = "onb-search-mark";
+        mark.textContent = text.slice(idx, idx + q.length);
+        frag.appendChild(mark);
+        marks.push(mark);
+        start = idx + q.length;
+      }
+      if (start < text.length) frag.appendChild(document.createTextNode(text.slice(start)));
+      node.parentNode.replaceChild(frag, node);
+    });
+
+    marksRef.current = marks;
+    setMatchCount(marks.length);
+    if (marks.length) { setMatchIndex(0); highlightCurrent(marks, 0); }
+    else setMatchIndex(-1);
+  }
+
+  function highlightCurrent(marks, idx) {
+    marks.forEach((m, i) => m.classList.toggle("onb-search-mark-current", i === idx));
+    if (marks[idx]) marks[idx].scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  useEffect(() => {
+    if (!loaded) return;
+    rebuildMarks(query.trim());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, loaded]);
+
+  function goToMatch(delta) {
+    const marks = marksRef.current;
+    if (!marks.length) return;
+    const next = (matchIndex + delta + marks.length) % marks.length;
+    setMatchIndex(next);
+    highlightCurrent(marks, next);
+  }
+
+  function clearSearch() {
+    setQuery("");
+  }
+
+  function handleClose() {
+    clearMarks();
+    flush();
+    notebook.syncNow();
+    onClose();
+  }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: BRAND.sand, zIndex: 70, overflowY: "auto" }}>
       <div style={{ background: BRAND.darkTeal, padding: "16px 24px" }}>
         <div style={{ maxWidth: 820, margin: "0 auto", display: "flex", alignItems: "center", gap: 12 }}>
-          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "7px 12px", color: BRAND.white, display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+          <button onClick={handleClose} className="onb-btn" style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "7px 12px", color: BRAND.white, display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
             <ChevronLeft size={15} /> Back
           </button>
           <div style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.8)" }}>📝 My Notebook</div>
@@ -1535,61 +1956,66 @@ function NotebookPage({ userId, onClose }) {
           Take notes while learning. Your notebook is private and always available in one place.
         </p>
 
-        <div style={{ position: "relative", maxWidth: 340, marginBottom: 16 }}>
-          <Search size={14} color={BRAND.teal} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
-          <input
-            type="text"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search in this notebook…"
-            style={{ width: "100%", boxSizing: "border-box", background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 999, padding: "9px 34px", fontSize: 13.5, color: BRAND.darkTeal }}
-          />
-          {query && (
-            <button onClick={() => setQuery("")} title="Clear search" className="onb-btn" style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", color: BRAND.teal, display: "flex", padding: 4 }}>
-              <X size={14} />
-            </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          <div style={{ position: "relative", maxWidth: 340, flex: "1 1 240px" }}>
+            <Search size={14} color={BRAND.teal} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter") { e.preventDefault(); goToMatch(e.shiftKey ? -1 : 1); }
+                if (e.key === "Escape") clearSearch();
+              }}
+              placeholder="Search in this notebook…"
+              style={{ width: "100%", boxSizing: "border-box", background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 999, padding: "9px 34px", fontSize: 13.5, color: BRAND.darkTeal }}
+            />
+            {query && (
+              <button onClick={clearSearch} title="Clear search" className="onb-btn" style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", color: BRAND.teal, display: "flex", padding: 4 }}>
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          {searching && (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12.5, color: BRAND.teal, flexShrink: 0 }}>
+              <span>{matchCount > 0 ? `${matchIndex + 1}/${matchCount}` : "No matches"}</span>
+              <button onClick={() => goToMatch(-1)} disabled={!matchCount} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: 4, color: BRAND.teal, opacity: matchCount ? 1 : 0.4 }}><ChevronLeft size={13} /></button>
+              <button onClick={() => goToMatch(1)} disabled={!matchCount} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: 4, color: BRAND.teal, opacity: matchCount ? 1 : 0.4 }}><ChevronRight size={13} /></button>
+            </div>
           )}
         </div>
 
         <div style={{ background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 16, overflow: "hidden" }}>
-          <div style={{ position: "relative", display: "grid" }}>
-            {activeQuery && (
-              <div
-                ref={overlayRef}
-                aria-hidden="true"
-                style={{ ...sharedFieldStyle, color: BRAND.darkTeal, background: BRAND.white, overflow: "hidden", pointerEvents: "none" }}
-              >
-                {highlightText(content, activeQuery)}
-              </div>
-            )}
-            <textarea
-              ref={textareaRef}
-              value={content}
-              onChange={handleChange}
-              onScroll={handleScroll}
-              disabled={!loaded}
-              placeholder={loaded ? "Start typing…" : "Loading your notebook…"}
-              style={{
-                ...sharedFieldStyle,
-                resize: "none", outline: "none",
-                color: activeQuery ? "transparent" : BRAND.darkTeal,
-                caretColor: BRAND.darkTeal,
-                background: "transparent",
-              }}
-            />
-          </div>
+          <NotebookEditor
+            containerRef={containerRef}
+            content={content}
+            loaded={loaded}
+            searching={searching}
+            onChangeHtml={handleContentChange}
+            placeholder="Start taking notes while you learn. Save useful tips, reminders, links, or anything you’d like to remember later."
+            insertHeadingRequest={insertHeadingRequest}
+            onHeadingInserted={onHeadingInserted}
+          />
         </div>
 
         <div style={{ marginTop: 12, fontSize: 12.5, color: BRAND.teal, minHeight: 16, display: "flex", alignItems: "center", gap: 6 }}>
-          {status === "saving" && <><Loader2 size={13} className="animate-spin" /> Saving…</>}
-          {status === "saved" && lastSavedAt && <><Check size={13} /> Saved {formatSavedTime(lastSavedAt)}</>}
-          {status === "error" && <span style={{ color: "#C0392B" }}>Couldn't save — will retry as you keep typing.</span>}
-          {status === "idle" && loaded && !lastSavedAt && <span>Nothing saved yet — start typing.</span>}
+          {!loaded && <span>Loading your notebook…</span>}
+          {loaded && status === "saving" && <><Loader2 size={13} className="animate-spin" /> Saving…</>}
+          {loaded && status === "saved" && lastSavedAt && <><Check size={13} /> Saved {formatSavedLabel(lastSavedAt)}</>}
+          {loaded && status === "error" && <span style={{ color: "#C0392B" }}>Couldn't save — will retry as you keep typing.</span>}
+          {loaded && status === "idle" && !lastSavedAt && <span>Nothing saved yet — start typing.</span>}
         </div>
       </div>
     </div>
   );
 }
+
+// A lightweight per-topic question to-do list — separate from Notes both in intent
+// (things you don't understand yet, to raise with a trainer/TL, vs. things you already
+// know and want to remember) and in storage (its own `questions` table, one row per
+// question). Hub already loads every question the user has, across every topic, once at
+// login — so this component is pure presentation + optimistic mutation, no per-topic
+// fetch and no loading flicker when a topic is opened.
 
 function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
   const [adding, setAdding] = useState(false);
@@ -1725,7 +2151,7 @@ function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
 }
 
 
-function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, questions, onQuestionsChange, showToast, linkStatesByUrl, onVisitLink, positionInCategory }) {
+function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, questions, onQuestionsChange, showToast, linkStatesByUrl, onVisitLink, positionInCategory, onAddNoteForTopic }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState({});
@@ -1758,6 +2184,16 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
             </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
+            {onAddNoteForTopic && (
+              <button
+                onClick={onAddNoteForTopic}
+                className="onb-btn"
+                title="Add a note for this topic"
+                style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px 12px", color: BRAND.teal, display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600 }}
+              >
+                📝 Add note
+              </button>
+            )}
             {editMode && (
               <button onClick={onEdit} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: 8, color: BRAND.teal }}><Pencil size={15} /></button>
             )}
