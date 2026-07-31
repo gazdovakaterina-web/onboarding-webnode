@@ -79,65 +79,154 @@ const ICON_PICKER_ORDER = [
   "alertTriangle", "star", "zap", "bell", "mapPin", "award", "lightbulb", "file",
 ];
 
+// ---------- Topic categories ----------
+// Registry-driven so the homepage can render one section per category without any
+// hardcoded "if getting_started render X, if product render Y" branching. Adding a
+// third section later (Internal Processes, Sales, Technical, …) is just adding an entry
+// here — the grouping/rendering logic below needs no changes.
+const TOPIC_CATEGORIES = [
+  { key: "getting_started", emoji: "🚀", label: "Getting Started", description: "Everything you need during your first days at Webnode." },
+  { key: "product", emoji: "📚", label: "Product Academy", description: "Build your product knowledge and customer support skills." },
+];
+const TOPIC_CATEGORY_MAP = Object.fromEntries(TOPIC_CATEGORIES.map(c => [c.key, c]));
+const DEFAULT_TOPIC_CATEGORY = "product";
+
+function getTopicCategory(topic) {
+  return topic?.category || DEFAULT_TOPIC_CATEGORY;
+}
+
+// Turns "sales_enablement" into "Sales Enablement" — used so a category that hasn't been
+// added to TOPIC_CATEGORIES yet (e.g. set directly in the database) still gets a readable
+// section heading instead of breaking or being silently dropped from the homepage.
+function humanizeCategoryKey(key) {
+  return key.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// Groups a flat topic list into ordered sections: known categories first (in the order
+// declared in TOPIC_CATEGORIES), then any other category present in the data, in the
+// order it was first encountered. Categories with zero topics (e.g. filtered out by
+// search) simply produce no section — callers don't need to special-case "empty".
+function groupTopicsIntoSections(topicsList) {
+  const byCategory = {};
+  const encounterOrder = [];
+  topicsList.forEach(t => {
+    const key = getTopicCategory(t);
+    if (!byCategory[key]) { byCategory[key] = []; encounterOrder.push(key); }
+    byCategory[key].push(t);
+  });
+
+  const sections = [];
+  const used = new Set();
+  TOPIC_CATEGORIES.forEach(cat => {
+    if (byCategory[cat.key]?.length) {
+      sections.push({ ...cat, topics: byCategory[cat.key] });
+      used.add(cat.key);
+    }
+  });
+  encounterOrder.forEach(key => {
+    if (used.has(key)) return;
+    sections.push({ key, emoji: "📁", label: humanizeCategoryKey(key), description: "More learning topics.", topics: byCategory[key] });
+  });
+  return sections;
+}
+
+// One topic card — used inside every category section. Kept as its own component so the
+// section-rendering loop below stays simple regardless of how many sections there are.
+function TopicCard({ topic: t, done, editMode, trimmedQuery, onOpen, onEdit }) {
+  const match = trimmedQuery ? getTopicMatch(t, trimmedQuery) : null;
+  const otherMatches = match ? match.filter(f => f.key !== "title" && f.key !== "description").map(f => f.label) : [];
+
+  return (
+    <div className="onb-card" onClick={onOpen} style={{ background: done ? BRAND.limeSoft : BRAND.white, border: `1px solid ${done ? "rgba(183,239,135,0.6)" : BRAND.sandBorder}`, borderTop: `3px solid ${done ? BRAND.lime : BRAND.teal}`, borderRadius: 12, padding: "20px 20px 18px", position: "relative" }}>
+      {editMode && (
+        <button onClick={(e) => { e.stopPropagation(); onEdit(); }} className="onb-btn" style={{ position: "absolute", top: 12, right: 12, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: 5, color: BRAND.teal }}>
+          <Pencil size={13} />
+        </button>
+      )}
+      {done && (
+        <div style={{ position: "absolute", top: 12, right: editMode ? 42 : 12, width: 22, height: 22, borderRadius: "50%", background: BRAND.lime, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Check size={13} color={BRAND.darkTeal} />
+        </div>
+      )}
+      <TopicIcon topic={t} />
+      <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{trimmedQuery ? highlightText(t.title, trimmedQuery) : t.title}</h3>
+      <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{trimmedQuery ? highlightText(t.description, trimmedQuery) : t.description}</p>
+      <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal }}>
+        <Clock size={12} /> {formatMinutes(getEstimatedTime(t))}
+      </div>
+      {otherMatches.length > 0 && (
+        <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 6, padding: "3px 8px" }}>
+          <Search size={11} /> Matches in {otherMatches.join(", ")}
+        </div>
+      )}
+      {t.quiz && t.quiz.length > 0 && (
+        <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.darkTeal, background: BRAND.limeSoft, borderRadius: 6, padding: "3px 8px", fontWeight: 700 }}>
+          <Zap size={11} /> Quiz
+        </div>
+      )}
+    </div>
+  );
+}
+
 const DEFAULT_TOPICS = [
-  { id: "search-tickets", estimatedTime: 6, icon: "search", order: 1,
+  { id: "search-tickets", category: "product", estimatedTime: 6, icon: "search", order: 1,
     title: "Search tickets", description: "Browse and filter Freshdesk tickets by month, agent, and reason.",
     slides: [
       { id: "s1", title: "What it's for", bullets: ["- Find tickets that need evaluating", "- Filter by month, agent, or contact reason", "- Already-evaluated tickets are flagged"] },
       { id: "s2", title: "Walkthrough", bullets: ["- Add the real steps here", "- Click Edit content to replace this slide"] },
     ],
     links: [], ticketLinks: [], tips: ["Add a practical tip for new hires here."], quiz: [] },
-  { id: "ticket-evaluation", estimatedTime: 8, icon: "clipboardCheck", order: 2,
+  { id: "ticket-evaluation", category: "product", estimatedTime: 8, icon: "clipboardCheck", order: 2,
     title: "Ticket evaluation", description: "Evaluate a ticket with a decision tree — quality, root cause, and improvement ideas.",
     slides: [
       { id: "s1", title: "How it works", bullets: ["- Decision tree: how the ticket was resolved", "- Quality and root cause are picked step by step", "- Score is calculated automatically"] },
     ],
     links: [], ticketLinks: [], tips: ["Add a practical tip for new hires here."], quiz: [] },
-  { id: "view-results", estimatedTime: 6, icon: "chart", order: 3,
+  { id: "view-results", category: "product", estimatedTime: 6, icon: "chart", order: 3,
     title: "View results", description: "Evaluations by quarter, team, and agent — scores, root causes, calibration flags.",
     slides: [ { id: "s1", title: "What's in here", bullets: ["- Filter by quarter, team, agent", "- Score and trend overview", "- Calibration flags"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "calibration-queue", estimatedTime: 5, icon: "target", order: 4,
+  { id: "calibration-queue", category: "product", estimatedTime: 5, icon: "target", order: 4,
     title: "Calibration queue", description: "Tickets flagged for calibration, waiting for a group review.",
     slides: [ { id: "s1", title: "How calibration works", bullets: ["- Tickets wait for a team discussion", "- Mark them calibrated once discussed"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "csat-report", estimatedTime: 6, icon: "smile", order: 5,
+  { id: "csat-report", category: "product", estimatedTime: 6, icon: "smile", order: 5,
     title: "CSAT report", description: "Customer satisfaction stats, top agents, and detailed feedback by period.",
     slides: [ { id: "s1", title: "Overview", bullets: ["- CSAT stats by period", "- Top agents", "- Detailed feedback analysis"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "team-management", estimatedTime: 7, icon: "users", order: 6,
+  { id: "team-management", category: "product", estimatedTime: 7, icon: "users", order: 6,
     title: "Team management", description: "Create and manage teams, add agents, organize the support structure.",
     slides: [ { id: "s1", title: "What you manage here", bullets: ["- Create and edit teams", "- Add agents", "- Support org structure"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "import-legacy", estimatedTime: 8, icon: "uploadCloud", order: 7,
+  { id: "import-legacy", category: "product", estimatedTime: 8, icon: "uploadCloud", order: 7,
     title: "Import legacy data", description: "Import evaluations from the old system by pasting Excel table data.",
     slides: [ { id: "s1", title: "How to import", bullets: ["- Paste data copied from Excel", "- Review and confirm the import"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "freshdesk-import", estimatedTime: 7, icon: "sync", order: 8,
+  { id: "freshdesk-import", category: "product", estimatedTime: 7, icon: "sync", order: 8,
     title: "Freshdesk import", description: "Import ticket data directly from Freshdesk exports for evaluation.",
     slides: [ { id: "s1", title: "How it works", bullets: ["- Upload a Freshdesk export", "- Data gets prepped for evaluation"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "export-data", estimatedTime: 5, icon: "downloadCloud", order: 9,
+  { id: "export-data", category: "product", estimatedTime: 5, icon: "downloadCloud", order: 9,
     title: "Export data", description: "Export evaluated tickets to CSV, Excel, or JSON, with optional date filtering.",
     slides: [ { id: "s1", title: "Export formats", bullets: ["- CSV, Excel, JSON", "- Optional date filtering"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "access-log", estimatedTime: 5, icon: "shieldCheck", order: 10,
+  { id: "access-log", category: "product", estimatedTime: 5, icon: "shieldCheck", order: 10,
     title: "Access log", description: "Login and logout activity, IP addresses, and unauthorized access attempts.",
     slides: [ { id: "s1", title: "What to watch for", bullets: ["- Login and logout history", "- IP addresses", "- Unauthorized access attempts"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "changelog", estimatedTime: 4, icon: "history", order: 11,
+  { id: "changelog", category: "product", estimatedTime: 4, icon: "history", order: 11,
     title: "Changelog", description: "Recent updates, bug fixes, and new features added to the system.",
     slides: [ { id: "s1", title: "What it's for", bullets: ["- History of system changes", "- New features and fixes"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "debug", estimatedTime: 6, icon: "wrench", order: 12,
+  { id: "debug", category: "product", estimatedTime: 6, icon: "wrench", order: 12,
     title: "Debug", description: "Inspect data paths, write permissions, JSON integrity, and record counts.",
     slides: [ { id: "s1", title: "When to use it", bullets: ["- Diagnose data issues", "- Check permissions and file integrity"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "migration", estimatedTime: 9, icon: "package", order: 13,
+  { id: "migration", category: "product", estimatedTime: 9, icon: "package", order: 13,
     title: "Migration", description: "One-shot: move old evaluations into the archive and set up the new store.",
     slides: [ { id: "s1", title: "What it does", bullets: ["- Moves old data into the archive", "- Initializes the new evaluations store"] } ],
     links: [], ticketLinks: [], tips: [], quiz: [] },
-  { id: "life-at-webnode", estimatedTime: 8, icon: "mapPin", order: 14,
+  { id: "life-at-webnode", category: "getting_started", estimatedTime: 8, icon: "mapPin", order: 103,
     title: "Life at Webnode", description: "How everyday life, support, and culture work here — who to ask, where things are, and how we work together.",
     slides: [
       { id: "s1", title: "Your support network", bullets: [
@@ -187,6 +276,63 @@ const DEFAULT_TOPICS = [
       ] },
     ],
     links: [], ticketLinks: [], tips: ["No question is too small — asking early saves time for everyone later."], quiz: [] },
+
+  // ---- Getting Started (onboarding/company knowledge) — placeholder content ----
+  { id: "welcome-to-webnode", category: "getting_started", estimatedTime: 5, icon: "smile", order: 101,
+    title: "Welcome to Webnode", description: "A quick introduction to who we are and what to expect from your first days.",
+    slides: [
+      { id: "s1", title: "Welcome", bullets: [
+        "Welcome to the team! This topic is a placeholder — an editor will fill in the real welcome content here.",
+        "- Add a short intro to Webnode as a company",
+        "- Add what makes us different and what we're proud of",
+        "- Add a friendly note on what to expect from onboarding",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "onboarding-journey", category: "getting_started", estimatedTime: 5, icon: "target", order: 102,
+    title: "Your Onboarding Journey", description: "What the next few weeks look like, step by step.",
+    slides: [
+      { id: "s1", title: "The journey ahead", bullets: [
+        "Placeholder — add the real onboarding timeline here.",
+        "- Add key milestones (e.g. week 1, week 2, first solo shift)",
+        "- Add what's expected of you at each stage",
+        "- Add where to track your own progress (this Learning Hub!)",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "who-can-help-me", category: "getting_started", estimatedTime: 5, icon: "helpCircle", order: 104,
+    title: "Who Can Help Me?", description: "A quick-reference guide to who to contact for what.",
+    slides: [
+      { id: "s1", title: "Quick reference", bullets: [
+        "Placeholder — add a short quick-reference list here (this can complement the fuller version in Life at Webnode).",
+        "- Add your trainer's name and contact",
+        "- Add your Team Leader's name and contact",
+        "- Add where to find the full support-network breakdown",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "communication-feedback", category: "getting_started", estimatedTime: 5, icon: "messageSquare", order: 105,
+    title: "Communication & Feedback", description: "How we talk to each other, and how feedback works here.",
+    slides: [
+      { id: "s1", title: "How we communicate", bullets: [
+        "Placeholder — add the real content here.",
+        "- Add which channels we use and when (chat, email, calls, standups)",
+        "- Add how and when feedback is given (1:1s, reviews, informal check-ins)",
+        "- Add how to give feedback upward, not just receive it",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
+  { id: "office-practical-info", category: "getting_started", estimatedTime: 5, icon: "mapPin", order: 106,
+    title: "Office & Practical Information", description: "The practical day-to-day details: where things are and how things work.",
+    slides: [
+      { id: "s1", title: "The practical stuff", bullets: [
+        "Placeholder — add the real content here (this can complement Life at Webnode's Kitchen & office slide).",
+        "- Add opening hours, entry/badge info, parking",
+        "- Add remote/hybrid work practicalities if relevant",
+        "- Add who to contact for facilities issues",
+      ] },
+    ],
+    links: [], ticketLinks: [], tips: [], quiz: [] },
 ];
 
 function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -448,14 +594,12 @@ function FormattingToolbar({ value, onChange, getTextarea }) {
 
 // ---------- Global search ----------
 // Searches across everything the app stores for a topic: title, description, slide
-// titles/content, tips, links, related tickets, quiz questions (+ their options), and
-// the current user's own Personal Notes for that topic. Matching is a simple
-// case-insensitive substring match — fast, predictable, and works the same way whether
-// the stored text is plain or uses the markdown syntax above.
+// titles/content, tips, links, related tickets, and quiz questions (+ their options).
+// Matching is a simple case-insensitive substring match — fast, predictable, and works
+// the same way whether the stored text is plain or uses the markdown syntax above.
 //
-// Notes are never part of the `topic` object (not stored in topic JSON, not sent to
-// editors as topic data) — they live only in the caller-supplied `notesByTopicId` map,
-// which Hub populates from the current user's own rows in the private `notes` table.
+// Personal Notes are a single, topic-independent notebook now (see NotebookPage) and are
+// intentionally not part of this search — there's no per-topic note left to match against.
 const SEARCH_FIELDS = [
   { key: "title", label: "Title" },
   { key: "description", label: "Description" },
@@ -465,10 +609,9 @@ const SEARCH_FIELDS = [
   { key: "links", label: "Links" },
   { key: "tickets", label: "Related tickets" },
   { key: "quiz", label: "Quiz questions" },
-  { key: "notes", label: "My Notes" },
 ];
 
-function getSearchableFieldText(topic, key, notesByTopicId) {
+function getSearchableFieldText(topic, key) {
   switch (key) {
     case "title": return topic.title || "";
     case "description": return topic.description || "";
@@ -478,19 +621,16 @@ function getSearchableFieldText(topic, key, notesByTopicId) {
     case "links": return (topic.links || []).map(l => `${l.label || ""} ${l.url || ""}`).join(" \n ");
     case "tickets": return (topic.ticketLinks || []).map(l => `${l.label || ""} ${l.url || ""}`).join(" \n ");
     case "quiz": return (topic.quiz || []).map(q => `${q.question || ""} ${(q.options || []).join(" ")}`).join(" \n ");
-    case "notes": return (notesByTopicId && notesByTopicId[topic.id]) || "";
     default: return "";
   }
 }
 
 // Returns the list of matched field descriptors ({ key, label }) for a topic, or null
 // if the query doesn't match anywhere. `query` is expected to already be trimmed.
-// `notesByTopicId` is optional — omitting it simply skips the notes field (used by
-// contexts that don't have the current user's notes loaded).
-function getTopicMatch(topic, query, notesByTopicId) {
+function getTopicMatch(topic, query) {
   if (!query) return null;
   const q = query.toLowerCase();
-  const matched = SEARCH_FIELDS.filter(f => getSearchableFieldText(topic, f.key, notesByTopicId).toLowerCase().includes(q));
+  const matched = SEARCH_FIELDS.filter(f => getSearchableFieldText(topic, f.key).toLowerCase().includes(q));
   return matched.length > 0 ? matched : null;
 }
 
@@ -601,34 +741,23 @@ async function fetchProfile(userId) {
   if (error) throw error;
   return data;
 }
-// Generic helpers for a "private per-user, per-topic single text blob" table — the shape
-// used by `notes` (one row per user per topic, holding one editable block of text).
-// `questions` used to share this shape too, but moved to a one-row-per-question model —
-// see the question-specific helpers below.
-async function fetchPrivateEntry(table, userId, topicId) {
-  const { data, error } = await supabase.from(table).select("content, updated_at").eq("user_id", userId).eq("topic_id", topicId).maybeSingle();
+// Generic helpers for a "single private text document per user" table — the shape used
+// by `notes`, now a single personal Notebook per user rather than one row per topic.
+async function fetchPrivateEntry(table, userId) {
+  const { data, error } = await supabase.from(table).select("content, updated_at").eq("user_id", userId).maybeSingle();
   if (error) throw error;
-  return data; // null when the user has no row for this topic yet
+  return data; // null when the user hasn't written anything yet
 }
-async function upsertPrivateEntry(table, userId, topicId, content) {
+async function upsertPrivateEntry(table, userId, content) {
   const { error } = await supabase.from(table).upsert(
-    { user_id: userId, topic_id: topicId, content, updated_at: new Date().toISOString() },
-    { onConflict: "user_id,topic_id" }
+    { user_id: userId, content, updated_at: new Date().toISOString() },
+    { onConflict: "user_id" }
   );
   if (error) throw error;
 }
 
-async function fetchNote(userId, topicId) { return fetchPrivateEntry("notes", userId, topicId); }
-async function upsertNote(userId, topicId, content) { return upsertPrivateEntry("notes", userId, topicId, content); }
-// Loads every note belonging to the current user in one request (RLS already scopes
-// this to auth.uid() = user_id — this query never sees other users' notes). Used once
-// after login to power local, offline search across notes without hitting the network
-// on every keystroke.
-async function fetchAllNotes(userId) {
-  const { data, error } = await supabase.from("notes").select("topic_id, content, updated_at").eq("user_id", userId);
-  if (error) throw error;
-  return data || []; // [{ topic_id, content, updated_at }]
-}
+async function fetchNotebook(userId) { return fetchPrivateEntry("notes", userId); }
+async function upsertNotebook(userId, content) { return upsertPrivateEntry("notes", userId, content); }
 
 // "Questions" are a lightweight per-topic to-do list — one row per question, deliberately
 // kept in its own table (separate from Notes) so a future "share with my trainer/TL"
@@ -794,19 +923,15 @@ function Hub({ session, profile }) {
   const [seeding, setSeeding] = useState(false);
   const [toast, setToast] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  // Local, per-user search index of Personal Notes: { [topicId]: content }. Loaded once
-  // after login (never on every keystroke) and kept fresh by NotesSection's onSaved
-  // callback. This is UI-local state only — never merged into `topics`/editor drafts.
-  const [notesByTopicId, setNotesByTopicId] = useState({});
-  // Id of the topic whose Notes section should be auto-focused, scrolled to, and
-  // highlighted the next time it's opened — set only when a global search result
-  // matched inside "My Notes". Cleared on any normal navigation.
-  const [notesSearchTrigger, setNotesSearchTrigger] = useState(null);
   // Local, per-user index of Questions: { [topicId]: Question[] }. Loaded once after
-  // login (same fetch-once approach as notesByTopicId) and kept fresh in real time by
-  // QuestionsSection's onChange callback — no refetch after every add/answer/delete.
+  // login and kept fresh in real time by QuestionsSection's onChange callback — no
+  // refetch after every add/answer/delete.
   const [questionsByTopicId, setQuestionsByTopicId] = useState({});
   const [showQuestionsModal, setShowQuestionsModal] = useState(false);
+  // Whether the dedicated Notebook page is open. The Notebook itself is a single
+  // per-user document (see NotebookPage) — it doesn't need to live in Hub's state at
+  // all, since it's fully self-contained once mounted.
+  const [showNotebook, setShowNotebook] = useState(false);
   // Local, per-user index of link resource states — currently only "visited" — for the
   // Links & Resources section: { [url]: Set<string> }. Loaded once after login, kept
   // fresh instantly by markLinkVisited's optimistic update. Generic on purpose: adding a
@@ -816,20 +941,14 @@ function Hub({ session, profile }) {
 
   useEffect(() => { loadAll(); }, []);
 
-  // Requirement: clear the notes highlight/focus trigger as soon as the search is cleared.
-  useEffect(() => {
-    if (!searchQuery.trim()) setNotesSearchTrigger(null);
-  }, [searchQuery]);
-
   async function loadAll() {
     try {
-      const [t, p, n, q, ls] = await Promise.all([
-        fetchTopics(), fetchProgress(session.user.id), fetchAllNotes(session.user.id),
+      const [t, p, q, ls] = await Promise.all([
+        fetchTopics(), fetchProgress(session.user.id),
         fetchAllQuestions(session.user.id), fetchAllLinkStates(session.user.id),
       ]);
       setTopics(t);
       setProgress(p);
-      setNotesByTopicId(Object.fromEntries(n.map(r => [r.topic_id, r.content || ""])));
       const qByTopic = {};
       q.forEach(row => { (qByTopic[row.topic_id] = qByTopic[row.topic_id] || []).push(row); });
       setQuestionsByTopicId(qByTopic);
@@ -924,7 +1043,17 @@ function Hub({ session, profile }) {
   const totalQuizzes = topics ? topics.reduce((sum, t) => sum + ((t.quiz && t.quiz.length) || 0), 0) : 0;
   const totalLearningMinutes = topics ? topics.reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const trimmedQuery = searchQuery.trim();
-  const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery, notesByTopicId)) : sorted;
+  const filtered = trimmedQuery ? sorted.filter(t => getTopicMatch(t, trimmedQuery)) : sorted;
+  // Homepage sections (Getting Started / Product Academy / …), computed dynamically —
+  // see groupTopicsIntoSections. Built from `filtered` so a search still narrows within
+  // each section rather than needing separate search UI per category.
+  const topicSections = groupTopicsIntoSections(filtered);
+  // Position within its own category — not the raw `order` value, since `order` ranges
+  // now vary by category (see DEFAULT_TOPICS) and no longer map 1:1 to "1st, 2nd, 3rd…"
+  // Always computed from the full topic list so it stays correct even mid-search.
+  const activePositionInCategory = active
+    ? sorted.filter(t => getTopicCategory(t) === getTopicCategory(active)).findIndex(t => t.id === active.id) + 1
+    : 1;
   // Every unanswered question, grouped by topic — powers both the dashboard reminder
   // count and the "View questions" review modal.
   const unansweredByTopic = Object.fromEntries(
@@ -934,14 +1063,12 @@ function Hub({ session, profile }) {
   );
   const unansweredCount = Object.values(unansweredByTopic).reduce((sum, list) => sum + list.length, 0);
 
-  // `viaNotesMatch`: true only when this open came from clicking a search result whose
-  // match included "My Notes" — drives auto-scroll/focus/highlight in NotesSection.
-  function openTopic(id, viaNotesMatch) { setActiveId(id); setSlideIdx(0); setNotesSearchTrigger(viaNotesMatch ? id : null); }
-  function closeTopic() { setActiveId(null); setSlideIdx(0); setNotesSearchTrigger(null); }
+  function openTopic(id) { setActiveId(id); setSlideIdx(0); }
+  function closeTopic() { setActiveId(null); setSlideIdx(0); }
   function startEdit(topic) { setEditDraft(JSON.parse(JSON.stringify(topic))); }
   function startNewTopic() {
     setEditDraft({
-      id: "topic-" + uid(), icon: "file",
+      id: "topic-" + uid(), icon: "file", category: DEFAULT_TOPIC_CATEGORY,
       order: (topics?.length || 0) + 1, title: "", description: "", estimatedTime: DEFAULT_ESTIMATED_MINUTES,
       slides: [{ id: uid(), title: "", bullets: [""] }], links: [], ticketLinks: [], tips: [], quiz: [],
     });
@@ -1065,6 +1192,27 @@ function Hub({ session, profile }) {
                 </div>
               </div>
 
+              <div style={{ marginTop: 14, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", textAlign: "left" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 15 }}>
+                    📝
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13.5, fontWeight: 700 }}>My Notebook</div>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>
+                      Your personal space for notes, reminders and anything you'd like to remember.
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowNotebook(true)}
+                  className="onb-btn"
+                  style={{ background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, flexShrink: 0 }}
+                >
+                  Open Notebook
+                </button>
+              </div>
+
               {unansweredCount > 0 && (
                 <div style={{ marginTop: 14, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", textAlign: "left" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1128,46 +1276,25 @@ function Hub({ session, profile }) {
           </button>
         </div>
       ) : (
-        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "32px 32px 8px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
-            {filtered.map(t => {
-              const done = !!progress[t.id];
-              const match = trimmedQuery ? getTopicMatch(t, trimmedQuery, notesByTopicId) : null;
-              const otherMatches = match ? match.filter(f => f.key !== "title" && f.key !== "description").map(f => f.label) : [];
-              const matchedNotes = !!(match && match.some(f => f.key === "notes"));
-              return (
-                <div key={t.id} className="onb-card" onClick={() => openTopic(t.id, matchedNotes)} style={{ background: done ? BRAND.limeSoft : BRAND.white, border: `1px solid ${done ? "rgba(183,239,135,0.6)" : BRAND.sandBorder}`, borderTop: `3px solid ${done ? BRAND.lime : BRAND.teal}`, borderRadius: 12, padding: "20px 20px 18px", position: "relative" }}>
-                  {editMode && (
-                    <button onClick={(e) => { e.stopPropagation(); startEdit(t); }} className="onb-btn" style={{ position: "absolute", top: 12, right: 12, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: 5, color: BRAND.teal }}>
-                      <Pencil size={13} />
-                    </button>
-                  )}
-                  {done && (
-                    <div style={{ position: "absolute", top: 12, right: editMode ? 42 : 12, width: 22, height: 22, borderRadius: "50%", background: BRAND.lime, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <Check size={13} color={BRAND.darkTeal} />
-                    </div>
-                  )}
-                  <TopicIcon topic={t} />
-                  <h3 style={{ fontSize: 16, fontWeight: 700, margin: "14px 0 6px" }}>{trimmedQuery ? highlightText(t.title, trimmedQuery) : t.title}</h3>
-                  <p style={{ fontSize: 13, color: BRAND.teal, lineHeight: 1.55, margin: 0 }}>{trimmedQuery ? highlightText(t.description, trimmedQuery) : t.description}</p>
-                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal }}>
-                    <Clock size={12} /> {formatMinutes(getEstimatedTime(t))}
-                  </div>
-                  {otherMatches.length > 0 && (
-                    <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 6, padding: "3px 8px" }}>
-                      <Search size={11} /> Matches in {otherMatches.join(", ")}
-                    </div>
-                  )}
-                  {t.quiz && t.quiz.length > 0 && (
-                    <div style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: BRAND.darkTeal, background: BRAND.limeSoft, borderRadius: 6, padding: "3px 8px", fontWeight: 700 }}>
-                      <Zap size={11} /> Quiz
-                    </div>
-                  )}
-                </div>
-              );
-
-            })}
-          </div>
+        <div style={{ maxWidth: 1200, margin: "0 auto", padding: "32px 32px 40px" }}>
+          {topicSections.map(section => (
+            <div key={section.key} style={{ marginBottom: 40 }}>
+              <div style={{ marginBottom: 16 }}>
+                <h2 style={{ fontSize: 19, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>{section.emoji} {section.label}</h2>
+                <p style={{ fontSize: 13.5, color: BRAND.teal, margin: 0 }}>{section.description}</p>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
+                {section.topics.map(t => (
+                  <TopicCard
+                    key={t.id} topic={t} done={!!progress[t.id]} editMode={editMode}
+                    trimmedQuery={trimmedQuery}
+                    onOpen={() => openTopic(t.id)}
+                    onEdit={() => startEdit(t)}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -1186,15 +1313,17 @@ function Hub({ session, profile }) {
           done={!!progress[active.id]} onToggleDone={() => toggleComplete(active.id)}
           editMode={editMode && isEditor} onEdit={() => startEdit(active)}
           userId={session.user.id}
-          onNoteSaved={(topicId, content) => setNotesByTopicId(prev => ({ ...prev, [topicId]: content }))}
-          notesFocusOnOpen={notesSearchTrigger === active.id}
-          notesHighlightQuery={notesSearchTrigger === active.id ? trimmedQuery : ""}
           questions={questionsByTopicId[active.id] || []}
           onQuestionsChange={handleQuestionsChange}
           showToast={showToast}
           linkStatesByUrl={linkStatesByUrl}
           onVisitLink={markLinkVisited}
+          positionInCategory={activePositionInCategory}
         />
+      )}
+
+      {showNotebook && (
+        <NotebookPage userId={session.user.id} onClose={() => setShowNotebook(false)} />
       )}
 
       {showQuestionsModal && (
@@ -1233,14 +1362,15 @@ function Hub({ session, profile }) {
 
 // ---------- Topic viewer (slides + quiz) ----------
 
-// ---------- Personal notes ----------
-// Drives one private, per-user, per-topic autosaving text field against any "notes"-
-// shaped table (id, user_id, topic_id, content, updated_at). Shared by Notes and
-// Questions so both get identical, battle-tested save behavior:
+// ---------- Personal Notebook ----------
+// Drives a single private, per-user autosaving text document against a "notes"-shaped
+// table (id, user_id, content, updated_at) — one row per user, full stop. Originally
+// this also had a per-topic dimension (when notes were split per topic); the Notebook
+// redesign dropped that entirely, which is what simplified this hook.
 //
 // Autosaves 1s after typing stops, never on a timer/interval while the user is actively
-// typing, and flushes any unsaved change immediately if the topic is closed (or a
-// different topic is opened) before that 1s window elapses.
+// typing, and flushes any unsaved change immediately if the Notebook page is closed
+// before that 1s window elapses.
 //
 // Saves are serialized through a single promise chain (`saveChainRef`) so they always
 // reach the table in the order they were queued — never two in flight at once, so an
@@ -1249,10 +1379,7 @@ function Hub({ session, profile }) {
 // snapshot taken when it was scheduled), so by the time an earlier-queued step executes
 // it's already saving the latest text; `lastSavedRef.current` is only ever updated after
 // the write is confirmed, so a failed save can never be mistaken for a saved one.
-//
-// `onSaved(topicId, content)` fires only after a confirmed successful save — Notes uses
-// this to keep Hub's local search index fresh instantly, with no refetch or polling.
-function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topicId, onSaved }) {
+function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, minHeight = 180 }) {
   const [content, setContent] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [status, setStatus] = useState("idle"); // "idle" | "saving" | "saved" | "error"
@@ -1272,10 +1399,10 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topic
   const resize = (el) => {
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = Math.max(el.scrollHeight, 180) + "px";
+    el.style.height = Math.max(el.scrollHeight, minHeight) + "px";
   };
 
-  // Load this topic's row whenever the topic changes.
+  // Load this user's document once.
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
@@ -1284,10 +1411,10 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topic
     contentRef.current = "";
     lastSavedRef.current = "";
     setLastSavedAt(null);
-    saveChainRef.current = Promise.resolve(); // fresh queue for this topic
+    saveChainRef.current = Promise.resolve(); // fresh queue
     (async () => {
       try {
-        const row = await fetchEntry(userId, topicId);
+        const row = await fetchEntry(userId);
         if (cancelled) return;
         const text = row?.content || "";
         setContent(text);
@@ -1301,7 +1428,7 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topic
       }
     })();
     return () => { cancelled = true; };
-  }, [table, userId, topicId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [table, userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { resize(textareaRef.current); }, [content, loaded]);
 
@@ -1316,13 +1443,12 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topic
       if (text === lastSavedRef.current) return; // nothing new since the last confirmed save
       if (mountedRef.current) setStatus("saving");
       try {
-        await upsertEntry(userId, topicId, text);
+        await upsertEntry(userId, text);
         lastSavedRef.current = text; // only advance this on confirmed success
         if (mountedRef.current) {
           setLastSavedAt(new Date());
           setStatus("saved");
         }
-        if (onSaved) onSaved(topicId, text);
       } catch {
         // Leave lastSavedRef untouched so this content is still considered "unsaved" —
         // the next edit (or the next flush) will naturally retry it.
@@ -1332,7 +1458,7 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topic
     return saveChainRef.current;
   };
 
-  // Saves immediately, skipping the debounce — used when leaving the topic and when a
+  // Saves immediately, skipping the debounce — used when the Notebook page closes and a
   // pending debounce needs to be superseded. Goes through the same serialized queue, so
   // it can never race ahead of (or be overwritten by) an already-queued save.
   const flush = () => {
@@ -1340,12 +1466,12 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topic
     enqueueSave();
   };
 
-  // Flush on topic switch / close (cleanup runs when userId/topicId change AND on unmount),
-  // so edits typed right before leaving the topic are never lost.
+  // Flush on unmount (closing the Notebook page), so edits typed right before leaving
+  // are never lost.
   useEffect(() => {
     return () => { flush(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [table, userId, topicId]);
+  }, [table, userId]);
 
   function handleChange(e) {
     const text = e.target.value;
@@ -1362,114 +1488,109 @@ function usePrivateAutosaveField({ table, fetchEntry, upsertEntry, userId, topic
   return { content, loaded, status, lastSavedAt, textareaRef, handleChange };
 }
 
-// Shared presentational card for a private autosaving text field (Notes, Questions, …).
-// `highlightQuery`/`overlayRef`/`onScroll` are optional — only Notes currently uses them
-// (driven by global search); omitting them renders a plain textarea, unchanged.
-function AutosaveTextCard({
-  icon, title, subtitle, content, loaded, status, lastSavedAt, textareaRef, onChange,
-  placeholderLoaded, placeholderLoading, highlightQuery, overlayRef, onScroll,
-}) {
-  const activeHighlightQuery = loaded && highlightQuery ? highlightQuery : "";
-  const sharedFieldStyle = {
-    gridArea: "1 / 1 / 2 / 2",
-    width: "100%", boxSizing: "border-box", minHeight: 180,
-    padding: "12px 14px", fontSize: 14, lineHeight: 1.6, fontFamily: font,
-    whiteSpace: "pre-wrap", overflowWrap: "break-word",
-  };
-
-  return (
-    <div style={{ marginTop: 24, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "18px 20px" }}>
-      <h4 style={{ fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>{icon} {title}</h4>
-      <p style={{ fontSize: 12, color: BRAND.teal, margin: "0 0 12px" }}>{subtitle}</p>
-      <div style={{ position: "relative", display: "grid" }}>
-        {activeHighlightQuery && (
-          <div
-            ref={overlayRef}
-            aria-hidden="true"
-            style={{
-              ...sharedFieldStyle,
-              borderRadius: 10, border: "1px solid transparent",
-              color: BRAND.darkTeal, background: BRAND.white,
-              overflow: "hidden", pointerEvents: "none",
-            }}
-          >
-            {highlightText(content, activeHighlightQuery)}
-          </div>
-        )}
-        <textarea
-          ref={textareaRef}
-          value={content}
-          onChange={onChange}
-          onScroll={onScroll}
-          disabled={!loaded}
-          placeholder={loaded ? placeholderLoaded : placeholderLoading}
-          style={{
-            ...sharedFieldStyle,
-            resize: "none", overflow: "hidden",
-            border: `1px solid ${BRAND.sandBorder}`, borderRadius: 10,
-            color: activeHighlightQuery ? "transparent" : BRAND.darkTeal,
-            caretColor: BRAND.darkTeal,
-            background: activeHighlightQuery ? "transparent" : BRAND.white,
-          }}
-        />
-      </div>
-      <div style={{ marginTop: 8, fontSize: 12, color: BRAND.teal, minHeight: 16, display: "flex", alignItems: "center", gap: 6 }}>
-        {status === "saving" && <><Loader2 size={12} className="animate-spin" /> Saving…</>}
-        {status === "saved" && lastSavedAt && <><Check size={12} /> Saved {formatSavedTime(lastSavedAt)}</>}
-        {status === "error" && <span style={{ color: "#C0392B" }}>Couldn't save — will retry as you keep typing.</span>}
-      </div>
-    </div>
-  );
-}
-
-// `onSaved(topicId, content)` lets the parent (Hub) keep its local search index of
-// notes fresh the instant a save succeeds — no refetch, no polling.
-// `focusOnOpen` / `highlightQuery` are only set when this topic was opened by clicking
-// a global-search result that matched inside "My Notes"; otherwise the section behaves
-// exactly as a plain autosaving textarea.
-function NotesSection({ userId, topicId, onSaved, focusOnOpen, highlightQuery }) {
-  const { content, loaded, status, lastSavedAt, textareaRef, handleChange } = usePrivateAutosaveField({
-    table: "notes", fetchEntry: fetchNote, upsertEntry: upsertNote, userId, topicId, onSaved,
-  });
-  const overlayRef = useRef(null);
-  const scrolledRef = useRef(false);
-
-  useEffect(() => { scrolledRef.current = false; }, [topicId]);
-
-  // Scroll to and focus the notes editor once — only after the topic's note has
-  // actually finished loading, and only when this open came from a "My Notes" search match.
-  useEffect(() => {
-    if (loaded && focusOnOpen && !scrolledRef.current && textareaRef.current) {
-      scrolledRef.current = true;
-      textareaRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
-      textareaRef.current.focus();
-    }
-  }, [loaded, focusOnOpen, textareaRef]);
-
-  // Keep the (non-interactive) highlight overlay's scroll position in lockstep with the
-  // real textarea, in case content ever exceeds the visible area.
-  const handleScroll = (e) => {
-    if (overlayRef.current) overlayRef.current.scrollTop = e.target.scrollTop;
-  };
-
-  return (
-    <AutosaveTextCard
-      icon="📝" title="My Notes" subtitle="These notes are private and only visible to you."
-      content={content} loaded={loaded} status={status} lastSavedAt={lastSavedAt}
-      textareaRef={textareaRef} onChange={handleChange}
-      placeholderLoaded="Jot down anything you'd like to remember about this topic…"
-      placeholderLoading="Loading your notes…"
-      highlightQuery={highlightQuery} overlayRef={overlayRef} onScroll={handleScroll}
-    />
-  );
-}
-
 // A lightweight per-topic question to-do list — separate from Notes both in intent
 // (things you don't understand yet, to raise with a trainer/TL, vs. things you already
 // know and want to remember) and in storage (its own `questions` table, one row per
 // question). Hub already loads every question the user has, across every topic, once at
 // login — so this component is pure presentation + optimistic mutation, no per-topic
 // fetch and no loading flicker when a topic is opened.
+// ---------- Notebook page ----------
+// A single, topic-independent notebook per user — replaces the old per-topic Notes
+// feature entirely. Full-screen "page" (not a small modal) so the editor has room to
+// breathe, reusing the same autosave engine that used to power per-topic Notes.
+function NotebookPage({ userId, onClose }) {
+  const { content, loaded, status, lastSavedAt, textareaRef, handleChange } = usePrivateAutosaveField({
+    table: "notes", fetchEntry: fetchNotebook, upsertEntry: upsertNotebook, userId, minHeight: 420,
+  });
+  const [query, setQuery] = useState("");
+  const overlayRef = useRef(null);
+  const activeQuery = loaded ? query.trim() : "";
+
+  const handleScroll = (e) => {
+    if (overlayRef.current) overlayRef.current.scrollTop = e.target.scrollTop;
+  };
+
+  const sharedFieldStyle = {
+    gridArea: "1 / 1 / 2 / 2",
+    width: "100%", boxSizing: "border-box", minHeight: 420,
+    padding: "20px 22px", fontSize: 15, lineHeight: 1.7, fontFamily: font,
+    whiteSpace: "pre-wrap", overflowWrap: "break-word",
+    border: "1px solid transparent", // constant width in both modes so overlay/textarea never drift by a pixel
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: BRAND.sand, zIndex: 70, overflowY: "auto" }}>
+      <div style={{ background: BRAND.darkTeal, padding: "16px 24px" }}>
+        <div style={{ maxWidth: 820, margin: "0 auto", display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "7px 12px", color: BRAND.white, display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+            <ChevronLeft size={15} /> Back
+          </button>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.8)" }}>📝 My Notebook</div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 820, margin: "0 auto", padding: "36px 24px 60px" }}>
+        <h1 style={{ fontSize: 27, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 8px" }}>My Notebook</h1>
+        <p style={{ fontSize: 14.5, color: BRAND.teal, margin: "0 0 22px", lineHeight: 1.6, maxWidth: 560 }}>
+          Take notes while learning. Your notebook is private and always available in one place.
+        </p>
+
+        <div style={{ position: "relative", maxWidth: 340, marginBottom: 16 }}>
+          <Search size={14} color={BRAND.teal} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
+          <input
+            type="text"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search in this notebook…"
+            style={{ width: "100%", boxSizing: "border-box", background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 999, padding: "9px 34px", fontSize: 13.5, color: BRAND.darkTeal }}
+          />
+          {query && (
+            <button onClick={() => setQuery("")} title="Clear search" className="onb-btn" style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", color: BRAND.teal, display: "flex", padding: 4 }}>
+              <X size={14} />
+            </button>
+          )}
+        </div>
+
+        <div style={{ background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 16, overflow: "hidden" }}>
+          <div style={{ position: "relative", display: "grid" }}>
+            {activeQuery && (
+              <div
+                ref={overlayRef}
+                aria-hidden="true"
+                style={{ ...sharedFieldStyle, color: BRAND.darkTeal, background: BRAND.white, overflow: "hidden", pointerEvents: "none" }}
+              >
+                {highlightText(content, activeQuery)}
+              </div>
+            )}
+            <textarea
+              ref={textareaRef}
+              value={content}
+              onChange={handleChange}
+              onScroll={handleScroll}
+              disabled={!loaded}
+              placeholder={loaded ? "Start typing…" : "Loading your notebook…"}
+              style={{
+                ...sharedFieldStyle,
+                resize: "none", outline: "none",
+                color: activeQuery ? "transparent" : BRAND.darkTeal,
+                caretColor: BRAND.darkTeal,
+                background: "transparent",
+              }}
+            />
+          </div>
+        </div>
+
+        <div style={{ marginTop: 12, fontSize: 12.5, color: BRAND.teal, minHeight: 16, display: "flex", alignItems: "center", gap: 6 }}>
+          {status === "saving" && <><Loader2 size={13} className="animate-spin" /> Saving…</>}
+          {status === "saved" && lastSavedAt && <><Check size={13} /> Saved {formatSavedTime(lastSavedAt)}</>}
+          {status === "error" && <span style={{ color: "#C0392B" }}>Couldn't save — will retry as you keep typing.</span>}
+          {status === "idle" && loaded && !lastSavedAt && <span>Nothing saved yet — start typing.</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
@@ -1604,7 +1725,7 @@ function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
 }
 
 
-function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, onNoteSaved, notesFocusOnOpen, notesHighlightQuery, questions, onQuestionsChange, showToast, linkStatesByUrl, onVisitLink }) {
+function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, questions, onQuestionsChange, showToast, linkStatesByUrl, onVisitLink, positionInCategory }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState({});
@@ -1628,7 +1749,7 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
       <div onClick={e => e.stopPropagation()} style={{ background: BRAND.white, borderRadius: 16, width: "100%", maxWidth: 720, maxHeight: "88vh", overflowY: "auto", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "20px 24px", borderBottom: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <div style={{ fontSize: 12, color: BRAND.teal, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6, fontWeight: 700 }}>Topic {String(topic.order).padStart(2, "0")}</div>
+            <div style={{ fontSize: 12, color: BRAND.teal, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6, fontWeight: 700 }}>Topic {String(positionInCategory ?? topic.order).padStart(2, "0")}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: BRAND.darkTeal }}>{topic.title}</h2>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 999, padding: "3px 10px" }}>
@@ -1723,11 +1844,6 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
                   <Zap size={16} color={BRAND.lime} /> Test your knowledge ({topic.quiz.length} question{topic.quiz.length > 1 ? "s" : ""})
                 </button>
               )}
-
-              <NotesSection
-                userId={userId} topicId={topic.id} onSaved={onNoteSaved}
-                focusOnOpen={notesFocusOnOpen} highlightQuery={notesHighlightQuery}
-              />
 
               <QuestionsSection
                 userId={userId} topicId={topic.id} questions={questions}
@@ -1917,7 +2033,7 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
               })}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             <div style={{ width: 90 }}>
               <label style={labelStyle}>Order</label>
               <input type="number" style={inputStyle} value={draft.order} onChange={e => update("order", Number(e.target.value))} />
@@ -1931,6 +2047,21 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                 value={draft.estimatedTime ?? DEFAULT_ESTIMATED_MINUTES}
                 onChange={e => update("estimatedTime", Math.max(1, Number(e.target.value) || DEFAULT_ESTIMATED_MINUTES))}
               />
+            </div>
+            <div style={{ flex: "1 1 180px" }}>
+              <label style={labelStyle}>Section</label>
+              <select
+                style={inputStyle}
+                value={draft.category || DEFAULT_TOPIC_CATEGORY}
+                onChange={e => update("category", e.target.value)}
+              >
+                {TOPIC_CATEGORIES.map(cat => (
+                  <option key={cat.key} value={cat.key}>{cat.emoji} {cat.label}</option>
+                ))}
+                {draft.category && !TOPIC_CATEGORY_MAP[draft.category] && (
+                  <option value={draft.category}>{humanizeCategoryKey(draft.category)}</option>
+                )}
+              </select>
             </div>
           </div>
 
