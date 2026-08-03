@@ -930,32 +930,115 @@ async function upsertPrivateEntry(table, userId, content) {
 async function fetchNotebook(userId) { return fetchPrivateEntry("notes", userId); }
 async function upsertNotebook(userId, content) { return upsertPrivateEntry("notes", userId, content); }
 
-// "Questions" are a lightweight per-topic to-do list — one row per question, deliberately
-// kept in its own table (separate from Notes) so a future "share with my trainer/TL"
-// feature, comments/answers, or notifications can be layered onto `questions` without
-// touching Notes at all. Each row already carries everything that future work needs:
-// topic, text, status (answered/unanswered), created_at, updated_at.
-async function fetchAllQuestions(userId) {
-  const { data, error } = await supabase.from("questions").select("id, topic_id, text, status, created_at, updated_at").eq("user_id", userId).order("created_at", { ascending: true });
-  if (error) throw error;
-  return data || []; // [{ id, topic_id, text, status, created_at, updated_at }]
+// ---------- Mentoring Questions ----------
+// An asynchronous mentoring conversation attached to a topic: the learner's original
+// question, plus zero or more replies (from the learner continuing the conversation, or
+// from an editor acting as mentor). Deliberately two tables (questions + replies, see
+// schema.sql) rather than one growing text blob, so replies can be attributed to a real
+// author/timestamp and queried on their own (e.g. "answered today", further down).
+//
+// Status vocabulary is normalized across two eras of this feature: the original simple
+// "My Questions" to-do list used 'unanswered'/'answered'; this mentoring version uses
+// 'waiting' (awaiting a mentor reply) / 'replied' (a mentor answered, awaiting the
+// learner) / 'resolved'. Every read goes through normalizeQuestionStatus so old rows
+// keep working with zero database migration.
+function normalizeQuestionStatus(status) {
+  if (status === "unanswered") return "waiting";
+  if (status === "answered") return "resolved";
+  if (status === "waiting" || status === "replied" || status === "resolved") return status;
+  return "waiting"; // unknown/missing — safest default is "still needs a look"
 }
-async function addQuestionRow(userId, topicId, text) {
+
+const QUESTION_STATUS_META = {
+  waiting: { emoji: "🟡", label: "Waiting for reply", color: "#B8860B" },
+  replied: { emoji: "💬", label: "Replied", color: "#2E6F8E" },
+  resolved: { emoji: "✅", label: "Resolved", color: "#2E7D4F" },
+};
+
+// Groundwork for a future FAQ feature (see schema.sql's `normalized_text` column) —
+// collapses case/punctuation/whitespace so "How do I add a domain?" and "how do i add a
+// domain" would group together once that feature exists. Not read anywhere yet.
+function normalizeQuestionText(text) {
+  return (text || "").toLowerCase().trim().replace(/[^\w\s]/g, "").replace(/\s+/g, " ");
+}
+
+const QUESTION_SELECT = "id, user_id, topic_id, text, status, created_at, updated_at, question_replies(id, author_id, body, created_at)";
+
+// Turns a raw Supabase row (with its embedded replies) into the shape every part of the
+// UI works with: normalized status, replies sorted oldest-first.
+function shapeQuestion(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    topicId: row.topic_id,
+    text: row.text,
+    status: normalizeQuestionStatus(row.status),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    replies: (row.question_replies || [])
+      .slice()
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      .map(r => ({ id: r.id, authorId: r.author_id, body: r.body, createdAt: r.created_at })),
+  };
+}
+
+// Every conversation this learner has ever started, across every topic — loaded once
+// after login (see Hub's loadAll) and kept fresh afterward via optimistic local updates.
+async function fetchMyQuestions(userId) {
+  const { data, error } = await supabase.from("questions").select(QUESTION_SELECT).eq("user_id", userId).order("created_at", { ascending: true });
+  if (error) throw error;
+  return (data || []).map(shapeQuestion);
+}
+
+// Editor-only: every learner's conversation, for the Learner Questions inbox — fetched
+// lazily (only when that page is opened), not on every login.
+async function fetchAllQuestionsForEditors() {
+  const { data, error } = await supabase.from("questions").select(QUESTION_SELECT).order("updated_at", { ascending: false });
+  if (error) throw error;
+  return (data || []).map(shapeQuestion);
+}
+
+// So the inbox can show which learner asked, and any reply can show a real identity
+// ("Tom (Editor)") instead of a raw user id. Readable by any signed-in user (see
+// schema.sql) — needed in both directions: learners need to identify the mentor who
+// replied, not just editors needing to identify the learner.
+async function fetchAllProfilesLite() {
+  const { data, error } = await supabase.from("profiles").select("id, email, role");
+  if (error) throw error;
+  return data || [];
+}
+
+async function askQuestion(userId, topicId, text) {
   const { data, error } = await supabase.from("questions")
-    .insert({ user_id: userId, topic_id: topicId, text, status: "unanswered" })
-    .select("id, topic_id, text, status, created_at, updated_at")
+    .insert({ user_id: userId, topic_id: topicId, text, normalized_text: normalizeQuestionText(text), status: "waiting" })
+    .select(QUESTION_SELECT)
     .single();
   if (error) throw error;
-  return data;
+  return shapeQuestion(data);
 }
-async function setQuestionStatus(userId, id, status) {
-  const { error } = await supabase.from("questions")
-    .update({ status, updated_at: new Date().toISOString() })
-    .eq("id", id).eq("user_id", userId);
-  if (error) throw error;
+
+// Adds a reply and moves the conversation into whichever court it now belongs in: an
+// editor's reply means the learner owes the next response ('replied'); a learner's
+// reply means a mentor does ('waiting') — which is also how reopening-via-reply works.
+async function replyToQuestion(questionId, authorId, body, isEditorReply) {
+  const { data: reply, error: replyErr } = await supabase.from("question_replies")
+    .insert({ question_id: questionId, author_id: authorId, body })
+    .select("id, author_id, body, created_at")
+    .single();
+  if (replyErr) throw replyErr;
+  const nextStatus = isEditorReply ? "replied" : "waiting";
+  const { error: statusErr } = await supabase.from("questions")
+    .update({ status: nextStatus, updated_at: new Date().toISOString() })
+    .eq("id", questionId);
+  if (statusErr) throw statusErr;
+  return { reply, status: nextStatus };
 }
-async function deleteQuestionRow(userId, id) {
-  const { error } = await supabase.from("questions").delete().eq("id", id).eq("user_id", userId);
+
+// Used for both "mark as resolved" and "reopen" (reopening just sets status back to
+// 'waiting') — deliberately no delete function anywhere in this file: per the design,
+// conversations never disappear, they become part of the learner's history.
+async function setQuestionStatus(questionId, status) {
+  const { error } = await supabase.from("questions").update({ status, updated_at: new Date().toISOString() }).eq("id", questionId);
   if (error) throw error;
 }
 
@@ -1108,11 +1191,22 @@ function Hub({ session, profile }) {
   const [seeding, setSeeding] = useState(false);
   const [toast, setToast] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  // Local, per-user index of Questions: { [topicId]: Question[] }. Loaded once after
-  // login and kept fresh in real time by QuestionsSection's onChange callback — no
-  // refetch after every add/answer/delete.
-  const [questionsByTopicId, setQuestionsByTopicId] = useState({});
-  const [showQuestionsModal, setShowQuestionsModal] = useState(false);
+  // ---------- Mentoring Questions ----------
+  // Every conversation *this* learner has started, across every topic — a flat list
+  // (each item already carries its own topicId), loaded once after login and kept fresh
+  // afterward via optimistic local updates (see handleAskQuestion/handleReplyToQuestion/
+  // handleSetQuestionStatus below) rather than refetching after every action.
+  const [myQuestions, setMyQuestions] = useState([]);
+  // Editor-only: every learner's conversation, across every learner/topic — powers the
+  // Learner Questions inbox. Fetched once at login for editors only (see loadAll);
+  // viewers never fetch or hold this.
+  const [allQuestions, setAllQuestions] = useState([]);
+  // { [userId]: { id, email, role } } — every signed-in user's public identity, used to
+  // label replies ("Tom (Mentor)") and, in the inbox, which learner asked. See
+  // fetchAllProfilesLite / the broadened profiles RLS policy in schema.sql.
+  const [profilesById, setProfilesById] = useState({});
+  const [showQuestionsPage, setShowQuestionsPage] = useState(false); // "My Questions" (everyone)
+  const [showQuestionsInbox, setShowQuestionsInbox] = useState(false); // "Learner Questions" (editors)
   // Whether the dedicated Notebook page is open. The notebook's *content* itself lives
   // in the `notebook` hook below (owned here, not inside NotebookPage), so it stays
   // available to the homepage's global search even while this is false.
@@ -1144,16 +1238,17 @@ function Hub({ session, profile }) {
   useEffect(() => { loadAll(); }, []);
 
   async function loadAll() {
-    // Promise.allSettled (not .all) deliberately — these five fetches are independent
-    // features (topics, progress, Questions, Links & Resources, Learning Milestones).
-    // If, say, the learning_milestones table hasn't been migrated yet on someone's
-    // Supabase project, that one rejection must not take down the whole homepage and
-    // show "No topics yet" even though topics loaded just fine — each piece degrades to
-    // an empty/default state on its own instead.
-    const [tRes, pRes, qRes, lsRes, mRes] = await Promise.allSettled([
+    // Promise.allSettled (not .all) deliberately — these are independent features
+    // (topics, progress, my Questions, Links & Resources, Learning Milestones,
+    // profiles, and — editors only — every learner's Questions). If, say, a table
+    // hasn't been migrated yet on someone's Supabase project, that one rejection must
+    // not take down the whole homepage and show "No topics yet" even though topics
+    // loaded just fine — each piece degrades to an empty/default state on its own.
+    const [tRes, pRes, myQRes, lsRes, mRes, profilesRes, allQRes] = await Promise.allSettled([
       fetchTopics(), fetchProgress(session.user.id),
-      fetchAllQuestions(session.user.id), fetchAllLinkStates(session.user.id),
-      fetchMilestoneState(session.user.id),
+      fetchMyQuestions(session.user.id), fetchAllLinkStates(session.user.id),
+      fetchMilestoneState(session.user.id), fetchAllProfilesLite(),
+      isEditor ? fetchAllQuestionsForEditors() : Promise.resolve([]),
     ]);
 
     if (tRes.status === "fulfilled") {
@@ -1166,11 +1261,8 @@ function Hub({ session, profile }) {
     if (pRes.status === "fulfilled") setProgress(pRes.value);
     else showToast(pRes.reason?.message || "Couldn't load progress.");
 
-    if (qRes.status === "fulfilled") {
-      const qByTopic = {};
-      qRes.value.forEach(row => { (qByTopic[row.topic_id] = qByTopic[row.topic_id] || []).push(row); });
-      setQuestionsByTopicId(qByTopic);
-    } // else: leave Questions at its initial {} — that table simply isn't set up yet
+    if (myQRes.status === "fulfilled") setMyQuestions(myQRes.value);
+    // else: leave My Questions at its initial [] — that table simply isn't set up yet
 
     if (lsRes.status === "fulfilled") {
       const statesByUrl = {};
@@ -1181,10 +1273,81 @@ function Hub({ session, profile }) {
       setLinkStatesByUrl(statesByUrl);
     }
 
+    if (profilesRes.status === "fulfilled") {
+      const map = {};
+      profilesRes.value.forEach(p => { map[p.id] = p; });
+      setProfilesById(map);
+    }
+
+    if (isEditor && allQRes.status === "fulfilled") setAllQuestions(allQRes.value);
+
     // No row yet (or the fetch failed, e.g. the table isn't migrated yet) means this
     // user has never been congratulated for anything — start them at level 0 (New
     // Joiner) so reaching it is never treated as a "milestone".
     setHighestMilestoneIdx(mRes.status === "fulfilled" && mRes.value ? getLevelIndex(mRes.value.level_key) : 0);
+  }
+
+  // Applies the same update to both question lists at once (my own +, if I'm an editor,
+  // the everyone-inbox copy) — every mutation below goes through this so the two never
+  // drift out of sync with each other.
+  function patchQuestion(id, updater) {
+    setMyQuestions(prev => prev.map(q => (q.id === id ? updater(q) : q)));
+    if (isEditor) setAllQuestions(prev => prev.map(q => (q.id === id ? updater(q) : q)));
+  }
+
+  // Optimistic: a new conversation appears instantly; reverted if the write fails.
+  async function handleAskQuestion(topicId, text) {
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const now = new Date().toISOString();
+    const optimistic = { id: tempId, userId: session.user.id, topicId, text, status: "waiting", createdAt: now, updatedAt: now, replies: [] };
+    setMyQuestions(prev => [...prev, optimistic]);
+    if (isEditor) setAllQuestions(prev => [...prev, optimistic]);
+    try {
+      const saved = await askQuestion(session.user.id, topicId, text);
+      patchQuestion(tempId, () => saved);
+    } catch (err) {
+      setMyQuestions(prev => prev.filter(q => q.id !== tempId));
+      if (isEditor) setAllQuestions(prev => prev.filter(q => q.id !== tempId));
+      throw err;
+    }
+  }
+
+  // Optimistic reply — appends the message locally and flips the conversation into
+  // whichever court it now belongs in, before the network round trip confirms it.
+  // `isEditorReply` is about who's *acting* right now (mentoring vs. continuing their
+  // own conversation), not the viewer's role — an editor asking their own question and
+  // replying to it is acting as a learner in that moment.
+  async function handleReplyToQuestion(question, text, isEditorReply) {
+    const authorId = session.user.id;
+    const tempReplyId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const now = new Date().toISOString();
+    const nextStatus = isEditorReply ? "replied" : "waiting";
+    patchQuestion(question.id, q => ({
+      ...q, status: nextStatus, updatedAt: now,
+      replies: [...q.replies, { id: tempReplyId, authorId, body: text, createdAt: now }],
+    }));
+    try {
+      const { reply } = await replyToQuestion(question.id, authorId, text, isEditorReply);
+      patchQuestion(question.id, q => ({
+        ...q,
+        replies: q.replies.map(r => (r.id === tempReplyId ? { id: reply.id, authorId: reply.author_id, body: reply.body, createdAt: reply.created_at } : r)),
+      }));
+    } catch (err) {
+      patchQuestion(question.id, () => question); // revert to the pre-optimistic snapshot
+      showToast(err?.message || "Couldn't send your reply. Try again.");
+    }
+  }
+
+  // Used for both "mark as resolved" and "reopen" (reopening just sets status back to
+  // 'waiting', putting it back in front of a mentor).
+  async function handleSetQuestionStatus(question, status) {
+    patchQuestion(question.id, q => ({ ...q, status, updatedAt: new Date().toISOString() }));
+    try {
+      await setQuestionStatus(question.id, status);
+    } catch (err) {
+      patchQuestion(question.id, () => question); // revert
+      showToast(err?.message || "Couldn't update this conversation. Try again.");
+    }
   }
 
   // Fire-and-forget: mark a Links & Resources URL as visited. Optimistic (updates the UI
@@ -1257,13 +1420,6 @@ function Hub({ session, profile }) {
     const next = !progress[id];
     setProgress(p => ({ ...p, [id]: next }));
     try { await setProgressRow(session.user.id, id, next); } catch (err) { showToast(err.message || "Couldn't save progress."); }
-  }
-
-  // Single entry point QuestionsSection calls after every add/answer/unanswer/delete —
-  // keeps Hub's index (and therefore the dashboard reminder + review modal) live with
-  // zero extra network round trips.
-  function handleQuestionsChange(topicId, list) {
-    setQuestionsByTopicId(prev => ({ ...prev, [topicId]: list }));
   }
 
   async function handleSeed() {
@@ -1362,14 +1518,14 @@ function Hub({ session, profile }) {
   const activePositionInCategory = active
     ? sorted.filter(t => getTopicCategory(t) === getTopicCategory(active)).findIndex(t => t.id === active.id) + 1
     : 1;
-  // Every unanswered question, grouped by topic — powers both the dashboard reminder
-  // count and the "View questions" review modal.
-  const unansweredByTopic = Object.fromEntries(
-    Object.entries(questionsByTopicId)
-      .map(([topicId, list]) => [topicId, list.filter(q => q.status !== "answered")])
-      .filter(([, list]) => list.length > 0)
-  );
-  const unansweredCount = Object.values(unansweredByTopic).reduce((sum, list) => sum + list.length, 0);
+  // ---------- Questions notification badges (simple version — no read-tracking) ----------
+  // Learner badge: conversations currently sitting in 'replied' status are, by
+  // definition, ones a mentor has answered and the learner hasn't acted on since —
+  // that's "a new reply" without needing a separate "seen" table.
+  const myNewReplyCount = myQuestions.filter(q => q.status === "replied").length;
+  // Editor badge: every learner's conversation still waiting on a mentor, across
+  // everyone — only meaningful (and only fetched) for editors.
+  const waitingForEditorCount = isEditor ? allQuestions.filter(q => q.status === "waiting").length : 0;
 
   function openTopic(id) { setActiveId(id); setSlideIdx(0); }
   function closeTopic() { setActiveId(null); setSlideIdx(0); }
@@ -1599,25 +1755,45 @@ function Hub({ session, profile }) {
                 </button>
               </div>
 
-              {unansweredCount > 0 && (
+              {/* My Questions — everyone's personal mentoring-conversation history.
+                  Badge wording only changes when there's something new to look at. */}
+              <div style={{ marginTop: 14, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", textAlign: "left" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 15 }}>
+                    💬
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13.5, fontWeight: 700 }}>My Questions</div>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>
+                      {myNewReplyCount > 0
+                        ? `🔔 You have ${myNewReplyCount} new repl${myNewReplyCount === 1 ? "y" : "ies"}.`
+                        : "Ask a mentor a question from any topic, any time."}
+                    </div>
+                  </div>
+                </div>
+                <button onClick={() => setShowQuestionsPage(true)} className="onb-btn" style={{ background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, flexShrink: 0 }}>
+                  Open
+                </button>
+              </div>
+
+              {/* Learner Questions — editors only: the mentoring inbox. */}
+              {isEditor && (
                 <div style={{ marginTop: 14, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", textAlign: "left" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <div style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(255,255,255,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 15 }}>
-                      ❓
+                      📥
                     </div>
                     <div>
-                      <div style={{ fontSize: 13.5, fontWeight: 700 }}>Questions to discuss</div>
+                      <div style={{ fontSize: 13.5, fontWeight: 700 }}>Learner Questions</div>
                       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)" }}>
-                        You have {unansweredCount} unanswered question{unansweredCount === 1 ? "" : "s"}. Review them with your trainer or Team Leader.
+                        {waitingForEditorCount > 0
+                          ? `🔔 ${waitingForEditorCount} unanswered learner question${waitingForEditorCount === 1 ? "" : "s"}.`
+                          : "Every learner's mentoring conversation, in one inbox."}
                       </div>
                     </div>
                   </div>
-                  <button
-                    onClick={() => setShowQuestionsModal(true)}
-                    className="onb-btn"
-                    style={{ background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, flexShrink: 0 }}
-                  >
-                    View questions
+                  <button onClick={() => setShowQuestionsInbox(true)} className="onb-btn" style={{ background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, flexShrink: 0 }}>
+                    Open
                   </button>
                 </div>
               )}
@@ -1713,8 +1889,11 @@ function Hub({ session, profile }) {
           done={!!progress[active.id]} onToggleDone={() => toggleComplete(active.id)}
           editMode={editMode && isEditor} onEdit={() => startEdit(active)}
           userId={session.user.id}
-          questions={questionsByTopicId[active.id] || []}
-          onQuestionsChange={handleQuestionsChange}
+          questions={myQuestions}
+          profilesById={profilesById}
+          onAskQuestion={handleAskQuestion}
+          onReplyToQuestion={handleReplyToQuestion}
+          onSetQuestionStatus={handleSetQuestionStatus}
           showToast={showToast}
           linkStatesByUrl={linkStatesByUrl}
           onVisitLink={markLinkVisited}
@@ -1733,21 +1912,28 @@ function Hub({ session, profile }) {
         />
       )}
 
-      {showQuestionsModal && (
-        <QuestionsReviewModal
-          unansweredByTopic={unansweredByTopic}
+      {showQuestionsPage && (
+        <MyQuestionsPage
+          questions={myQuestions}
           topics={sorted}
-          onClose={() => setShowQuestionsModal(false)}
-          onMarkAnswered={(topicId, q) => {
-            const list = questionsByTopicId[topicId] || [];
-            const nextList = list.map(item => (item.id === q.id ? { ...item, status: "answered", updated_at: new Date().toISOString() } : item));
-            handleQuestionsChange(topicId, nextList);
-            setQuestionStatus(session.user.id, q.id, "answered").catch(err => {
-              handleQuestionsChange(topicId, list); // revert
-              showToast(err?.message || "Couldn't update question. Try again.");
-            });
-          }}
-          onOpenTopic={(topicId) => { setShowQuestionsModal(false); openTopic(topicId); }}
+          profilesById={profilesById}
+          userId={session.user.id}
+          onReply={(q, text) => handleReplyToQuestion(q, text, false)}
+          onSetStatus={handleSetQuestionStatus}
+          onClose={() => setShowQuestionsPage(false)}
+          onOpenTopic={topicId => { setShowQuestionsPage(false); openTopic(topicId); }}
+        />
+      )}
+
+      {showQuestionsInbox && (
+        <QuestionsInboxPage
+          questions={allQuestions}
+          topics={sorted}
+          profilesById={profilesById}
+          viewerUserId={session.user.id}
+          onReply={(q, text) => handleReplyToQuestion(q, text, true)}
+          onSetStatus={handleSetQuestionStatus}
+          onClose={() => setShowQuestionsInbox(false)}
         />
       )}
 
@@ -2281,77 +2467,174 @@ function NotebookPage({ notebook, onClose, initialQuery, insertHeadingRequest, o
   );
 }
 
-// A lightweight per-topic question to-do list — separate from Notes both in intent
-// (things you don't understand yet, to raise with a trainer/TL, vs. things you already
-// know and want to remember) and in storage (its own `questions` table, one row per
-// question). Hub already loads every question the user has, across every topic, once at
-// login — so this component is pure presentation + optimistic mutation, no per-topic
-// fetch and no loading flicker when a topic is opened.
+// ---------- Mentoring Questions: shared UI ----------
 
-function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
+// Turns "tom.smith@webnode.com" into "Tom Smith" — used whenever we don't have a nicer
+// display name to fall back on (this app's profiles table only stores email + role).
+function displayNameFromEmail(email) {
+  if (!email) return "Someone";
+  const namePart = (email.split("@")[0] || "").replace(/[._-]+/g, " ").trim();
+  if (!namePart) return "Someone";
+  return namePart.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// "You", or "Tom Smith (Mentor)" for an editor's reply, or "Tom Smith" for a learner's.
+// Editors are labeled "Mentor" here rather than "Editor" — same role, but this is the
+// word a learner actually sees, per the design goal ("editors act as mentors").
+function getAuthorLabel(profile, viewerUserId, authorId) {
+  if (authorId === viewerUserId) return "You";
+  if (!profile) return "Someone";
+  const name = displayNameFromEmail(profile.email);
+  return profile.role === "editor" ? `${name} (Mentor)` : name;
+}
+
+// One mentoring conversation: the original question, every reply in order, a status
+// badge, and — for whoever's allowed — a reply box plus resolve/reopen controls. Used
+// in three places (same component, different data around it): the per-topic Questions
+// section, the learner's My Questions page, and the editor's Learner Questions inbox.
+function ConversationThread({ question, topicTitle, onOpenTopic, learnerLabel, profilesById, viewerUserId, isEditorActor, onReply, onSetStatus, defaultExpanded }) {
+  const [expanded, setExpanded] = useState(!!defaultExpanded);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const meta = QUESTION_STATUS_META[question.status];
+
+  async function handleSend() {
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      await onReply(question, text);
+      setDraft("");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div style={{ background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 10, overflow: "hidden" }}>
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="onb-btn"
+        style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", padding: "12px 14px", display: "flex", alignItems: "flex-start", gap: 10 }}
+      >
+        <span style={{ fontSize: 15, flexShrink: 0, marginTop: 1 }}>{meta.emoji}</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          {(topicTitle || learnerLabel) && (
+            <div style={{ fontSize: 11, fontWeight: 700, color: BRAND.teal, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 2, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {topicTitle && (
+                onOpenTopic ? (
+                  <span onClick={e => { e.stopPropagation(); onOpenTopic(question.topicId); }} style={{ textDecoration: "underline", cursor: "pointer" }}>{topicTitle}</span>
+                ) : <span>{topicTitle}</span>
+              )}
+              {learnerLabel && <span style={{ opacity: 0.7 }}>· {learnerLabel}</span>}
+            </div>
+          )}
+          <div style={{ fontSize: 13.5, color: BRAND.darkTeal, fontWeight: 600, lineHeight: 1.4 }}>{question.text}</div>
+          <div style={{ fontSize: 11.5, color: meta.color, fontWeight: 700, marginTop: 4 }}>
+            {meta.label}{question.replies.length > 0 ? ` · ${question.replies.length} repl${question.replies.length === 1 ? "y" : "ies"}` : ""}
+          </div>
+        </span>
+        <ChevronRight size={14} color={BRAND.teal} style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform .15s", flexShrink: 0, marginTop: 3 }} />
+      </button>
+
+      {expanded && (
+        <div style={{ borderTop: `1px solid ${BRAND.sandBorder}`, padding: 14, background: BRAND.sand }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {question.replies.length === 0 && (
+              <p style={{ fontSize: 12.5, color: BRAND.teal, fontStyle: "italic", margin: 0 }}>No replies yet.</p>
+            )}
+            {question.replies.map(r => {
+              const p = profilesById[r.authorId];
+              const isEditorAuthor = p?.role === "editor";
+              return (
+                <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: isEditorAuthor ? BRAND.darkTeal : BRAND.teal }}>
+                    {getAuthorLabel(p, viewerUserId, r.authorId)}{" "}
+                    <span style={{ fontWeight: 400, color: BRAND.teal }}>· {formatSavedTime(new Date(r.createdAt))}</span>
+                  </div>
+                  <div style={{ fontSize: 13.5, color: BRAND.darkTeal, lineHeight: 1.55, background: isEditorAuthor ? BRAND.limeSoft : BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
+                    {r.body}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {question.status !== "resolved" && (
+            <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+              <textarea
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleSend(); } }}
+                placeholder={isEditorActor ? "Write a reply as a mentor…" : "Continue the conversation…"}
+                rows={2}
+                style={{ flex: 1, resize: "vertical", background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px 10px", fontSize: 13, fontFamily: font, color: BRAND.darkTeal, boxSizing: "border-box" }}
+              />
+              <button onClick={handleSend} disabled={sending || !draft.trim()} className="onb-btn" style={{ background: BRAND.darkTeal, border: "none", borderRadius: 8, padding: "0 14px", color: BRAND.white, fontSize: 13, fontWeight: 600, opacity: sending || !draft.trim() ? 0.6 : 1, flexShrink: 0 }}>
+                Send
+              </button>
+            </div>
+          )}
+
+          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {question.status !== "resolved" ? (
+              <button onClick={() => onSetStatus(question, "resolved")} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "6px 12px", color: BRAND.teal, fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+                <Check size={13} /> Mark as resolved
+              </button>
+            ) : (
+              <button onClick={() => onSetStatus(question, "waiting")} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "6px 12px", color: BRAND.teal, fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+                <RefreshCw size={13} /> Reopen
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Per-topic mentoring Q&A — shows previous conversations for this topic and lets the
+// learner start a new one. Topic-aware by construction: since this lives inside
+// TopicViewer, the topic is already known, so the learner never has to say what it's
+// about (see the feature's "Topic Awareness" goal).
+function QuestionsSection({ userId, topicId, questions, profilesById, onAsk, onReply, onSetStatus, showToast }) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
-  const [showAnswered, setShowAnswered] = useState(false);
+  const [sending, setSending] = useState(false);
   const inputRef = useRef(null);
 
-  useEffect(() => {
-    if (adding && inputRef.current) inputRef.current.focus();
-  }, [adding]);
+  useEffect(() => { if (adding && inputRef.current) inputRef.current.focus(); }, [adding]);
 
-  const unanswered = questions.filter(q => q.status !== "answered");
-  const answered = questions.filter(q => q.status === "answered");
+  const topicQuestions = questions.filter(q => q.topicId === topicId).slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 
-  async function handleAdd() {
+  async function handleAsk() {
     const text = draft.trim();
-    if (!text) { setAdding(false); setDraft(""); return; }
-    setDraft("");
-    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const now = new Date().toISOString();
-    const optimisticList = [...questions, { id: tempId, topic_id: topicId, text, status: "unanswered", created_at: now, updated_at: now }];
-    onChange(optimisticList);
+    if (!text || sending) return;
+    setSending(true);
     try {
-      const saved = await addQuestionRow(userId, topicId, text);
-      onChange(optimisticList.map(q => (q.id === tempId ? saved : q)));
+      await onAsk(topicId, text);
+      setDraft("");
+      setAdding(false);
     } catch (err) {
-      onChange(questions); // revert to the pre-optimistic list
-      showToast(err?.message || "Couldn't add question. Try again.");
+      showToast(err?.message || "Couldn't send your question. Try again.");
     }
+    setSending(false);
   }
-
-  async function handleSetStatus(q, status) {
-    const nextList = questions.map(item => (item.id === q.id ? { ...item, status, updated_at: new Date().toISOString() } : item));
-    onChange(nextList);
-    try {
-      await setQuestionStatus(userId, q.id, status);
-    } catch (err) {
-      onChange(questions); // revert
-      showToast(err?.message || "Couldn't update question. Try again.");
-    }
-  }
-
-  async function handleDelete(q) {
-    const nextList = questions.filter(item => item.id !== q.id);
-    onChange(nextList);
-    try {
-      await deleteQuestionRow(userId, q.id);
-    } catch (err) {
-      onChange(questions); // revert
-      showToast(err?.message || "Couldn't delete question. Try again.");
-    }
-  }
-
-  const draftInputStyle = { flex: 1, background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, color: BRAND.darkTeal, padding: "9px 12px", fontSize: 13.5, boxSizing: "border-box", fontFamily: font };
 
   return (
     <div style={{ marginTop: 24, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "18px 20px" }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
         <div>
-          <h4 style={{ fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>❓ My Questions</h4>
-          <p style={{ fontSize: 12, color: BRAND.teal, margin: 0 }}>Questions to discuss with your trainer or Team Leader.</p>
+          <h4 style={{ fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>💬 Questions</h4>
+          <p style={{ fontSize: 12, color: BRAND.teal, margin: 0 }}>
+            {topicQuestions.length > 0
+              ? `You have ${topicQuestions.length} previous question${topicQuestions.length === 1 ? "" : "s"} in this topic.`
+              : "Ask a mentor anything about this topic — they'll reply here, no need to leave the Hub."}
+          </p>
         </div>
         {!adding && (
           <button onClick={() => setAdding(true)} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "6px 12px", color: BRAND.teal, fontSize: 12.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-            <Plus size={13} /> Add question
+            <Plus size={13} /> Ask a question
           </button>
         )}
       </div>
@@ -2364,57 +2647,35 @@ function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
             value={draft}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
-              if (e.key === "Enter") { e.preventDefault(); handleAdd(); }
+              if (e.key === "Enter") { e.preventDefault(); handleAsk(); }
               if (e.key === "Escape") { setDraft(""); setAdding(false); }
             }}
-            placeholder='e.g. "How does private domain registration work?"'
-            style={draftInputStyle}
+            placeholder="e.g. why can't I connect Google Search Console on a Free website?"
+            disabled={sending}
+            style={{ flex: 1, background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, color: BRAND.darkTeal, padding: "9px 12px", fontSize: 13.5, boxSizing: "border-box", fontFamily: font }}
           />
-          <button onClick={handleAdd} className="onb-btn" style={{ background: BRAND.darkTeal, border: "none", borderRadius: 8, padding: "0 14px", color: BRAND.white, fontSize: 13, fontWeight: 600 }}>Add</button>
+          <button onClick={handleAsk} disabled={sending} className="onb-btn" style={{ background: BRAND.darkTeal, border: "none", borderRadius: 8, padding: "0 14px", color: BRAND.white, fontSize: 13, fontWeight: 600, opacity: sending ? 0.6 : 1 }}>Ask</button>
           <button onClick={() => { setDraft(""); setAdding(false); }} title="Cancel" className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", color: BRAND.teal, display: "flex", alignItems: "center" }}>
             <X size={14} />
           </button>
         </div>
       )}
 
-      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
-        {unanswered.length === 0 && !adding && (
-          <p style={{ fontSize: 12.5, color: BRAND.teal, margin: 0, fontStyle: "italic" }}>No open questions for this topic yet.</p>
-        )}
-        {unanswered.map(q => (
-          <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8, background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px 10px" }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", border: `2px solid ${BRAND.teal}`, flexShrink: 0 }} />
-            <span style={{ flex: 1, fontSize: 13.5, color: BRAND.darkTeal, lineHeight: 1.4 }}>{q.text}</span>
-            <button onClick={() => handleSetStatus(q, "answered")} title="Mark as answered" className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal, padding: 4, display: "flex", flexShrink: 0 }}>
-              <Check size={15} />
-            </button>
-            <button onClick={() => handleDelete(q)} title="Delete" className="onb-btn" style={{ background: "transparent", border: "none", color: "#C0392B", padding: 4, display: "flex", flexShrink: 0 }}>
-              <Trash2 size={14} />
-            </button>
-          </div>
-        ))}
-      </div>
+      {topicQuestions.length === 0 && !adding && (
+        <p style={{ marginTop: 14, fontSize: 12.5, color: BRAND.teal, margin: "14px 0 0", fontStyle: "italic" }}>No conversations for this topic yet.</p>
+      )}
 
-      {answered.length > 0 && (
-        <div style={{ marginTop: 14 }}>
-          <button onClick={() => setShowAnswered(s => !s)} className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal, fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
-            <ChevronRight size={12} style={{ transform: showAnswered ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
-            Answered questions ({answered.length})
-          </button>
-          {showAnswered && (
-            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-              {answered.map(q => (
-                <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px" }}>
-                  <Check size={13} color={BRAND.teal} style={{ flexShrink: 0 }} />
-                  <span style={{ flex: 1, fontSize: 13, color: "rgba(38,85,100,0.55)", textDecoration: "line-through", lineHeight: 1.4 }}>{q.text}</span>
-                  <button onClick={() => handleSetStatus(q, "unanswered")} title="Mark as unanswered" className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal, fontSize: 11, padding: 4, flexShrink: 0 }}>Undo</button>
-                  <button onClick={() => handleDelete(q)} title="Delete" className="onb-btn" style={{ background: "transparent", border: "none", color: "#C0392B", padding: 4, display: "flex", flexShrink: 0 }}>
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+      {topicQuestions.length > 0 && (
+        <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+          {topicQuestions.map(q => (
+            <ConversationThread
+              key={q.id} question={q} profilesById={profilesById} viewerUserId={userId}
+              isEditorActor={false}
+              onReply={(question, text) => onReply(question, text, false)}
+              onSetStatus={onSetStatus}
+              defaultExpanded={topicQuestions.length === 1}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -2422,7 +2683,7 @@ function QuestionsSection({ userId, topicId, questions, onChange, showToast }) {
 }
 
 
-function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, questions, onQuestionsChange, showToast, linkStatesByUrl, onVisitLink, positionInCategory, onAddNoteForTopic }) {
+function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, questions, profilesById, onAskQuestion, onReplyToQuestion, onSetQuestionStatus, showToast, linkStatesByUrl, onVisitLink, positionInCategory, onAddNoteForTopic }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState({});
@@ -2553,8 +2814,9 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
               )}
 
               <QuestionsSection
-                userId={userId} topicId={topic.id} questions={questions}
-                onChange={list => onQuestionsChange(topic.id, list)} showToast={showToast}
+                userId={userId} topicId={topic.id} questions={questions} profilesById={profilesById}
+                onAsk={onAskQuestion} onReply={onReplyToQuestion} onSetStatus={onSetQuestionStatus}
+                showToast={showToast}
               />
             </>
           )}
@@ -2621,52 +2883,82 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
   );
 }
 
-// ---------- Questions review modal ----------
-// Opened from the dashboard reminder card. Read-mostly: groups every unanswered
-// question by topic so it's easy to run through with a trainer/Team Leader, with a
-// quick "mark as answered" action per item and a link back into the topic itself.
-function QuestionsReviewModal({ unansweredByTopic, topics, onClose, onMarkAnswered, onOpenTopic }) {
-  const groups = topics
-    .map(t => ({ topic: t, items: unansweredByTopic[t.id] || [] }))
-    .filter(g => g.items.length > 0);
-  const total = groups.reduce((sum, g) => sum + g.items.length, 0);
+// ---------- My Questions (learner's personal mentoring history) ----------
+// Every conversation this learner has ever started, across every topic. Per the design
+// goal, conversations never disappear — this is deliberately their whole history, not
+// just open items, with filters to narrow it down.
+function MyQuestionsPage({ questions, topics, profilesById, userId, onReply, onSetStatus, onClose, onOpenTopic }) {
+  const [filter, setFilter] = useState("all");
+  const topicById = Object.fromEntries(topics.map(t => [t.id, t]));
+  const sorted = questions.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  const counts = {
+    waiting: sorted.filter(q => q.status === "waiting").length,
+    replied: sorted.filter(q => q.status === "replied").length,
+    resolved: sorted.filter(q => q.status === "resolved").length,
+  };
+  const filtered = filter === "all" ? sorted : sorted.filter(q => q.status === filter);
+
+  const tabs = [
+    { key: "all", label: `All (${sorted.length})` },
+    { key: "waiting", label: `🟡 Waiting (${counts.waiting})` },
+    { key: "replied", label: `💬 Replied (${counts.replied})` },
+    { key: "resolved", label: `✅ Resolved (${counts.resolved})` },
+  ];
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(30,60,71,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 55, padding: 20 }} onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{ background: BRAND.white, borderRadius: 16, width: "100%", maxWidth: 600, maxHeight: "82vh", overflowY: "auto", display: "flex", flexDirection: "column" }}>
-        <div style={{ padding: "20px 24px", borderBottom: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div>
-            <h2 style={{ margin: 0, fontSize: 19, fontWeight: 700, color: BRAND.darkTeal }}>❓ Questions to discuss</h2>
-            <p style={{ margin: "4px 0 0", fontSize: 13, color: BRAND.teal }}>{total} unanswered question{total === 1 ? "" : "s"}, grouped by topic.</p>
-          </div>
-          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: 8, color: BRAND.teal }}><X size={15} /></button>
+    <div style={{ position: "fixed", inset: 0, background: BRAND.sand, zIndex: 70, overflowY: "auto" }}>
+      <div style={{ background: BRAND.darkTeal, padding: "16px 24px" }}>
+        <div style={{ maxWidth: 820, margin: "0 auto", display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "7px 12px", color: BRAND.white, display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+            <ChevronLeft size={15} /> Back
+          </button>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.8)" }}>💬 My Questions</div>
         </div>
-        <div style={{ padding: "16px 24px 24px", display: "flex", flexDirection: "column", gap: 20 }}>
-          {groups.length === 0 && (
-            <p style={{ fontSize: 13, color: BRAND.teal }}>No unanswered questions left. 🎉</p>
-          )}
-          {groups.map(({ topic, items }) => (
-            <div key={topic.id}>
-              <button
-                onClick={() => onOpenTopic(topic.id)}
-                className="onb-btn"
-                style={{ background: "transparent", border: "none", padding: 0, fontSize: 13, fontWeight: 700, color: BRAND.darkTeal, display: "flex", alignItems: "center", gap: 5 }}
-                title="Open this topic"
-              >
-                {topic.title} <ExternalLink size={11} style={{ opacity: 0.6 }} />
-              </button>
-              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                {items.map(q => (
-                  <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 8, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px 10px" }}>
-                    <span style={{ width: 8, height: 8, borderRadius: "50%", border: `2px solid ${BRAND.teal}`, flexShrink: 0 }} />
-                    <span style={{ flex: 1, fontSize: 13.5, color: BRAND.darkTeal, lineHeight: 1.4 }}>{q.text}</span>
-                    <button onClick={() => onMarkAnswered(topic.id, q)} title="Mark as answered" className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal, padding: 4, display: "flex", flexShrink: 0 }}>
-                      <Check size={15} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
+      </div>
+
+      <div style={{ maxWidth: 820, margin: "0 auto", padding: "36px 24px 60px" }}>
+        <h1 style={{ fontSize: 27, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 8px" }}>My Questions</h1>
+        <p style={{ fontSize: 14.5, color: BRAND.teal, margin: "0 0 20px", lineHeight: 1.6, maxWidth: 560 }}>
+          Every mentoring conversation you've started, across every topic. Nothing here ever disappears — it's part of your learning history.
+        </p>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+          {tabs.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setFilter(t.key)}
+              className="onb-btn"
+              style={{
+                background: filter === t.key ? BRAND.darkTeal : BRAND.white,
+                color: filter === t.key ? BRAND.white : BRAND.darkTeal,
+                border: `1px solid ${filter === t.key ? BRAND.darkTeal : BRAND.sandBorder}`,
+                borderRadius: 999, padding: "7px 14px", fontSize: 12.5, fontWeight: 600,
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {filtered.length === 0 && (
+          <p style={{ fontSize: 13.5, color: BRAND.teal, fontStyle: "italic" }}>
+            {sorted.length === 0 ? "You haven't asked anything yet — open any topic and ask a mentor a question." : "No conversations match this filter."}
+          </p>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {filtered.map(q => (
+            <ConversationThread
+              key={q.id}
+              question={q}
+              topicTitle={topicById[q.topicId]?.title || "Unknown topic"}
+              onOpenTopic={onOpenTopic}
+              profilesById={profilesById}
+              viewerUserId={userId}
+              isEditorActor={false}
+              onReply={onReply}
+              onSetStatus={onSetStatus}
+            />
           ))}
         </div>
       </div>
@@ -2674,7 +2966,133 @@ function QuestionsReviewModal({ unansweredByTopic, topics, onClose, onMarkAnswer
   );
 }
 
-// ---------- Edit modal ----------
+// ---------- Learner Questions (editor mentoring inbox) ----------
+// Every learner's conversation, across every topic — a lightweight support inbox for
+// editors acting as mentors: dashboard insights up top, filters, then the list itself.
+function QuestionsInboxPage({ questions, topics, profilesById, viewerUserId, onReply, onSetStatus, onClose }) {
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [topicFilter, setTopicFilter] = useState("all");
+  const [learnerFilter, setLearnerFilter] = useState("all");
+
+  const topicById = Object.fromEntries(topics.map(t => [t.id, t]));
+
+  // ---- Dashboard insights ----
+  const waitingCount = questions.filter(q => q.status === "waiting").length;
+  const resolvedCount = questions.filter(q => q.status === "resolved").length;
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const answeredToday = questions.reduce((sum, q) => {
+    const editorRepliesToday = q.replies.filter(r => profilesById[r.authorId]?.role === "editor" && new Date(r.createdAt) >= startOfToday);
+    return sum + editorRepliesToday.length;
+  }, 0);
+
+  const topicCounts = {};
+  questions.forEach(q => { topicCounts[q.topicId] = (topicCounts[q.topicId] || 0) + 1; });
+  const topTopics = Object.entries(topicCounts)
+    .map(([topicId, count]) => ({ topicId, count, title: topicById[topicId]?.title || "Unknown topic" }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  // ---- Filter option lists ----
+  const learnerIds = [...new Set(questions.map(q => q.userId))];
+  const learners = learnerIds.map(id => ({ id, label: displayNameFromEmail(profilesById[id]?.email) + (id === viewerUserId ? " (you)" : "") }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const topicsWithQuestions = topics.filter(t => topicCounts[t.id] > 0);
+
+  let filtered = questions;
+  if (statusFilter !== "all") filtered = filtered.filter(q => q.status === statusFilter);
+  if (topicFilter !== "all") filtered = filtered.filter(q => q.topicId === topicFilter);
+  if (learnerFilter !== "all") filtered = filtered.filter(q => q.userId === learnerFilter);
+  filtered = filtered.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+
+  const selectStyle = { background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px 10px", fontSize: 12.5, color: BRAND.darkTeal, fontFamily: font };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: BRAND.sand, zIndex: 70, overflowY: "auto" }}>
+      <div style={{ background: BRAND.darkTeal, padding: "16px 24px" }}>
+        <div style={{ maxWidth: 1040, margin: "0 auto", display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "7px 12px", color: BRAND.white, display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+            <ChevronLeft size={15} /> Back
+          </button>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.8)" }}>📥 Learner Questions</div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1040, margin: "0 auto", padding: "36px 24px 60px" }}>
+        <h1 style={{ fontSize: 27, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 8px" }}>Learner Questions</h1>
+        <p style={{ fontSize: 14.5, color: BRAND.teal, margin: "0 0 22px", lineHeight: 1.6, maxWidth: 620 }}>
+          Every learner's mentoring conversation, in one place — reply, resolve, or reopen. This also shows where learners are struggling, which is useful for improving the material itself.
+        </p>
+
+        {/* Dashboard insights */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
+          {[
+            { emoji: "🟡", value: waitingCount, label: "Waiting for reply" },
+            { emoji: "💬", value: answeredToday, label: "Answered today" },
+            { emoji: "✅", value: resolvedCount, label: "Resolved" },
+          ].map((s, i) => (
+            <div key={i} style={{ flex: "1 1 160px", minWidth: 150, background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "12px 14px" }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: BRAND.darkTeal }}>{s.emoji} {s.value}</div>
+              <div style={{ fontSize: 11.5, color: BRAND.teal, marginTop: 2 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {topTopics.length > 0 && (
+          <div style={{ background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: BRAND.darkTeal, marginBottom: 8 }}>Most common topics</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              {topTopics.map(t => (
+                <div key={t.topicId} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: BRAND.teal }}>
+                  <span>{t.title}</span>
+                  <span style={{ fontWeight: 700, color: BRAND.darkTeal }}>{t.count}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Filters */}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+          <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={selectStyle}>
+            <option value="all">All statuses</option>
+            <option value="waiting">🟡 Waiting</option>
+            <option value="replied">💬 Replied</option>
+            <option value="resolved">✅ Resolved</option>
+          </select>
+          <select value={topicFilter} onChange={e => setTopicFilter(e.target.value)} style={selectStyle}>
+            <option value="all">All topics</option>
+            {topicsWithQuestions.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}
+          </select>
+          <select value={learnerFilter} onChange={e => setLearnerFilter(e.target.value)} style={selectStyle}>
+            <option value="all">All learners</option>
+            {learners.map(l => <option key={l.id} value={l.id}>{l.label}</option>)}
+          </select>
+        </div>
+
+        {filtered.length === 0 && (
+          <p style={{ fontSize: 13.5, color: BRAND.teal, fontStyle: "italic" }}>No conversations match these filters.</p>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {filtered.map(q => (
+            <ConversationThread
+              key={q.id}
+              question={q}
+              topicTitle={topicById[q.topicId]?.title || "Unknown topic"}
+              learnerLabel={displayNameFromEmail(profilesById[q.userId]?.email) + (q.userId === viewerUserId ? " (you)" : "")}
+              profilesById={profilesById}
+              viewerUserId={viewerUserId}
+              isEditorActor
+              onReply={onReply}
+              onSetStatus={onSetStatus}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
   const slideTextareaRefs = useRef({});
