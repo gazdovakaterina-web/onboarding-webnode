@@ -99,29 +99,8 @@ const TOPIC_CATEGORIES = [
 const TOPIC_CATEGORY_MAP = Object.fromEntries(TOPIC_CATEGORIES.map(c => [c.key, c]));
 const DEFAULT_TOPIC_CATEGORY = "product";
 
-// ---------- Backward compatibility: inferring a missing category ----------
-// Topics created before the Getting Started / Product Academy split (or restored from
-// an older export/backup) have no `category` field at all — `topic.category` is
-// `undefined` or explicitly `null`. Rather than lumping every one of those into Product
-// Academy (which would silently count onboarding topics toward XP and Learning Levels),
-// infer a category from the topic's title, the same way a human skimming the list would.
-// Titles that look like onboarding content map to Getting Started; anything else —
-// recognized product topics or anything unrecognized — falls through to Product
-// Academy, same as the old flat default. This keeps existing data working correctly with
-// zero manual database edits; see migrateLegacyTopics() in Hub for optionally writing
-// the inferred value back so it becomes explicit.
-const ONBOARDING_TITLE_KEYWORDS = [
-  "welcome", "communication", "feedback", "culture", "internal rules",
-  "office", "practical", "who can help", "onboarding", "journey", "life at webnode",
-];
-
-function inferCategoryFromTitle(title) {
-  const t = (title || "").toLowerCase();
-  return ONBOARDING_TITLE_KEYWORDS.some(kw => t.includes(kw)) ? "getting_started" : DEFAULT_TOPIC_CATEGORY;
-}
-
 function getTopicCategory(topic) {
-  return topic?.category || inferCategoryFromTitle(topic?.title);
+  return topic?.category || DEFAULT_TOPIC_CATEGORY;
 }
 
 // Whether a category's topics count toward Product Academy XP / Learning Levels. A
@@ -1144,47 +1123,30 @@ function Hub({ session, profile }) {
   useEffect(() => { loadAll(); }, []);
 
   async function loadAll() {
-    // Promise.allSettled (not .all) deliberately — these five fetches are independent
-    // features (topics, progress, Questions, Links & Resources, Learning Milestones).
-    // If, say, the learning_milestones table hasn't been migrated yet on someone's
-    // Supabase project, that one rejection must not take down the whole homepage and
-    // show "No topics yet" even though topics loaded just fine — each piece degrades to
-    // an empty/default state on its own instead.
-    const [tRes, pRes, qRes, lsRes, mRes] = await Promise.allSettled([
-      fetchTopics(), fetchProgress(session.user.id),
-      fetchAllQuestions(session.user.id), fetchAllLinkStates(session.user.id),
-      fetchMilestoneState(session.user.id),
-    ]);
-
-    if (tRes.status === "fulfilled") {
-      setTopics(tRes.value);
-    } else {
-      showToast(tRes.reason?.message || "Couldn't load topics.");
-      setTopics([]);
-    }
-
-    if (pRes.status === "fulfilled") setProgress(pRes.value);
-    else showToast(pRes.reason?.message || "Couldn't load progress.");
-
-    if (qRes.status === "fulfilled") {
+    try {
+      const [t, p, q, ls, milestone] = await Promise.all([
+        fetchTopics(), fetchProgress(session.user.id),
+        fetchAllQuestions(session.user.id), fetchAllLinkStates(session.user.id),
+        fetchMilestoneState(session.user.id),
+      ]);
+      setTopics(t);
+      setProgress(p);
       const qByTopic = {};
-      qRes.value.forEach(row => { (qByTopic[row.topic_id] = qByTopic[row.topic_id] || []).push(row); });
+      q.forEach(row => { (qByTopic[row.topic_id] = qByTopic[row.topic_id] || []).push(row); });
       setQuestionsByTopicId(qByTopic);
-    } // else: leave Questions at its initial {} — that table simply isn't set up yet
-
-    if (lsRes.status === "fulfilled") {
       const statesByUrl = {};
-      lsRes.value.forEach(row => {
+      ls.forEach(row => {
         if (!statesByUrl[row.url]) statesByUrl[row.url] = new Set();
         statesByUrl[row.url].add(row.state);
       });
       setLinkStatesByUrl(statesByUrl);
+      // No row yet means this user has never been congratulated for anything — start
+      // them at level 0 (New Joiner) so reaching it is never treated as a "milestone".
+      setHighestMilestoneIdx(milestone ? getLevelIndex(milestone.level_key) : 0);
+    } catch (err) {
+      showToast(err.message || "Couldn't load data.");
+      setTopics([]);
     }
-
-    // No row yet (or the fetch failed, e.g. the table isn't migrated yet) means this
-    // user has never been congratulated for anything — start them at level 0 (New
-    // Joiner) so reaching it is never treated as a "milestone".
-    setHighestMilestoneIdx(mRes.status === "fulfilled" && mRes.value ? getLevelIndex(mRes.value.level_key) : 0);
   }
 
   // Fire-and-forget: mark a Links & Resources URL as visited. Optimistic (updates the UI
@@ -1278,45 +1240,9 @@ function Hub({ session, profile }) {
     setSeeding(false);
   }
 
-  // ---------- One-time migration for legacy topics ----------
-  // The app already infers a missing `category`/`xp` at read time (see
-  // getTopicCategory / getTopicXp), so nothing breaks without running this. This is
-  // purely optional, for editors who'd rather have those values stored explicitly (e.g.
-  // to then hand-tune XP per topic, or fix a mis-inferred category) than re-derived on
-  // every load. Safe to run more than once — already-migrated topics are skipped.
-  async function migrateLegacyTopics() {
-    if (!topics) return;
-    const needsMigration = topics.filter(t => !t.category || !Number.isFinite(t.xp) || t.xp <= 0);
-    if (needsMigration.length === 0) {
-      showToast("Nothing to migrate — every topic already has a section and XP.");
-      return;
-    }
-    setSaving(true);
-    let migrated = 0;
-    try {
-      for (const t of needsMigration) {
-        await upsertTopicRow({
-          ...t,
-          category: t.category || inferCategoryFromTitle(t.title),
-          xp: Number.isFinite(t.xp) && t.xp > 0 ? t.xp : getTopicXp(t),
-        });
-        migrated++;
-      }
-      await loadAll();
-      showToast(`Migrated ${migrated} topic${migrated === 1 ? "" : "s"}.`);
-    } catch (err) {
-      showToast(err.message || `Migration stopped after ${migrated} topic${migrated === 1 ? "" : "s"} — safe to run again.`);
-    }
-    setSaving(false);
-  }
-
   const active = topics && activeId ? topics.find(t => t.id === activeId) : null;
   const sorted = topics ? [...topics].sort((a, b) => a.order - b.order) : [];
   const totalCount = topics ? topics.length : 0;
-  // Topics missing an explicit `category` and/or valid `xp` — the app already infers
-  // sensible values for these at read time, so this count only drives the *optional*
-  // "Migrate legacy topics" button, not anything user-facing.
-  const legacyTopicCount = topics ? topics.filter(t => !t.category || !Number.isFinite(t.xp) || t.xp <= 0).length : 0;
   const remainingMinutes = topics ? topics.filter(t => !progress[t.id]).reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
   const totalQuizzes = topics ? topics.reduce((sum, t) => sum + ((t.quiz && t.quiz.length) || 0), 0) : 0;
   const totalLearningMinutes = topics ? topics.reduce((sum, t) => sum + getEstimatedTime(t), 0) : 0;
@@ -1688,21 +1614,10 @@ function Hub({ session, profile }) {
       )}
 
       {editMode && isEditor && (
-        <div style={{ textAlign: "center", marginTop: 20, display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ textAlign: "center", marginTop: 20 }}>
           <button onClick={startNewTopic} className="onb-btn" style={{ background: "transparent", border: `1px dashed ${BRAND.teal}`, color: BRAND.teal, borderRadius: 10, padding: "10px 20px", fontSize: 14, display: "inline-flex", alignItems: "center", gap: 6 }}>
             <Plus size={16} /> Add topic
           </button>
-          {legacyTopicCount > 0 && (
-            <button
-              onClick={migrateLegacyTopics}
-              disabled={saving}
-              className="onb-btn"
-              title="Fills in a section and XP value for topics saved before this system existed — safe to run more than once."
-              style={{ background: "transparent", border: `1px dashed ${BRAND.teal}`, color: BRAND.teal, borderRadius: 10, padding: "10px 20px", fontSize: 14, display: "inline-flex", alignItems: "center", gap: 6 }}
-            >
-              <RefreshCw size={16} /> Migrate {legacyTopicCount} legacy topic{legacyTopicCount === 1 ? "" : "s"}
-            </button>
-          )}
         </div>
       )}
 
@@ -2755,7 +2670,7 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                 onChange={e => update("estimatedTime", Math.max(1, Number(e.target.value) || DEFAULT_ESTIMATED_MINUTES))}
               />
             </div>
-            {categoryTracksXp(getTopicCategory(draft)) && (
+            {categoryTracksXp(draft.category || DEFAULT_TOPIC_CATEGORY) && (
               <div style={{ width: 110 }}>
                 <label style={labelStyle}>XP</label>
                 <input
@@ -2775,7 +2690,7 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
               <label style={labelStyle}>Section</label>
               <select
                 style={inputStyle}
-                value={getTopicCategory(draft)}
+                value={draft.category || DEFAULT_TOPIC_CATEGORY}
                 onChange={e => update("category", e.target.value)}
               >
                 {TOPIC_CATEGORIES.map(cat => (
