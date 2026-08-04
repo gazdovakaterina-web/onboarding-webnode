@@ -772,6 +772,58 @@ function getEstimatedTime(topic) {
   return Number.isFinite(val) && val > 0 ? Math.round(val) : DEFAULT_ESTIMATED_MINUTES;
 }
 
+// ---------- Practical exercise completion ----------
+// How a topic "ends" is configurable per-topic (see the topic editor's "Completion"
+// section) rather than hardcoded per lesson — this is what lets the Blog topic, the
+// Business Website topic, or any future practical exercise reuse the exact same submit
+// → review → resolve workflow with nothing but different data (attachment type +
+// template). Every field here is read through a getter with a safe fallback, so a topic
+// saved before this feature existed — which has none of these fields — is simply
+// treated as a Standard lesson, unchanged.
+const ATTACHMENT_TYPES = [
+  { key: "none", label: "None" },
+  { key: "url", label: "Website URL", placeholder: "https://…", inputType: "url" },
+  // No file-upload storage exists in this app today, so "Screenshot" is a link field
+  // (e.g. to an uploaded image, Drive file, or Loom) rather than a real file picker.
+  { key: "screenshot", label: "Screenshot", placeholder: "Paste a link to your screenshot", inputType: "url" },
+  { key: "ticket", label: "Ticket ID", placeholder: "e.g. #4821", inputType: "text" },
+  { key: "text", label: "Text answer", placeholder: "Write your answer…", inputType: "textarea" },
+];
+const ATTACHMENT_TYPE_MAP = Object.fromEntries(ATTACHMENT_TYPES.map(a => [a.key, a]));
+const DEFAULT_ATTACHMENT_TYPE = "none";
+
+const DEFAULT_REVIEW_TEMPLATE =
+`Hi!
+I've completed this practical exercise.
+Website:
+{{attachment}}
+I'd really appreciate your feedback and suggestions for improvement.
+Thank you!`;
+
+function isPracticalExercise(topic) {
+  return topic?.completionType === "practical";
+}
+// Whether this topic ends with "Submit for Review" rather than a plain "Mark as
+// complete" — the only flag the rest of the app needs to check.
+function requiresTrainerReview(topic) {
+  return isPracticalExercise(topic) && !!topic?.requiresReview;
+}
+function getAttachmentType(topic) {
+  return ATTACHMENT_TYPE_MAP[topic?.attachmentType] ? topic.attachmentType : DEFAULT_ATTACHMENT_TYPE;
+}
+function getReviewTemplate(topic) {
+  return typeof topic?.reviewTemplate === "string" && topic.reviewTemplate.trim()
+    ? topic.reviewTemplate
+    : DEFAULT_REVIEW_TEMPLATE;
+}
+// Fills {{attachment}} into a review template — every occurrence, so an editor can
+// reference it more than once if they want. An empty value leaves a visible placeholder
+// rather than a blank gap, since this is shown live while the learner is still typing.
+function fillReviewTemplate(template, attachmentValue) {
+  const value = (attachmentValue || "").trim();
+  return template.replace(/\{\{attachment\}\}/g, value || "___");
+}
+
 // ---------- Learning Points (XP) ----------
 // Product Academy's progress bar is driven by weighted XP rather than a raw topic count
 // or a sum of estimated minutes — a 5-minute topic and a 45-minute topic shouldn't move
@@ -962,7 +1014,14 @@ function normalizeQuestionText(text) {
   return (text || "").toLowerCase().trim().replace(/[^\w\s]/g, "").replace(/\s+/g, " ");
 }
 
-const QUESTION_SELECT = "id, user_id, topic_id, text, status, created_at, updated_at, question_replies(id, author_id, body, created_at)";
+const QUESTION_SELECT_BASE = "id, user_id, topic_id, text, status, created_at, updated_at, question_replies(id, author_id, body, created_at)";
+// `kind` distinguishes an ordinary learner question ('question') from a practical
+// exercise's "Submit for Review" submission ('review') — see requiresTrainerReview /
+// askQuestion's `kind` param. Selected as a separate, optional column (with a fallback
+// below) so a Supabase project that hasn't yet run the small migration adding it
+// doesn't have Questions break entirely — those rows are just treated as ordinary
+// questions (see shapeQuestion's default).
+const QUESTION_SELECT = QUESTION_SELECT_BASE + ", kind";
 
 // Turns a raw Supabase row (with its embedded replies) into the shape every part of the
 // UI works with: normalized status, replies sorted oldest-first.
@@ -973,6 +1032,7 @@ function shapeQuestion(row) {
     topicId: row.topic_id,
     text: row.text,
     status: normalizeQuestionStatus(row.status),
+    kind: row.kind || "question",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     replies: (row.question_replies || [])
@@ -985,17 +1045,31 @@ function shapeQuestion(row) {
 // Every conversation this learner has ever started, across every topic — loaded once
 // after login (see Hub's loadAll) and kept fresh afterward via optimistic local updates.
 async function fetchMyQuestions(userId) {
-  const { data, error } = await supabase.from("questions").select(QUESTION_SELECT).eq("user_id", userId).order("created_at", { ascending: true });
-  if (error) throw error;
-  return (data || []).map(shapeQuestion);
+  try {
+    const { data, error } = await supabase.from("questions").select(QUESTION_SELECT).eq("user_id", userId).order("created_at", { ascending: true });
+    if (error) throw error;
+    return (data || []).map(shapeQuestion);
+  } catch {
+    // `kind` isn't migrated on this project yet — retry without it rather than letting
+    // Questions fail outright; every row just reads back as an ordinary question.
+    const { data, error } = await supabase.from("questions").select(QUESTION_SELECT_BASE).eq("user_id", userId).order("created_at", { ascending: true });
+    if (error) throw error;
+    return (data || []).map(shapeQuestion);
+  }
 }
 
 // Editor-only: every learner's conversation, for the Learner Questions inbox — fetched
 // lazily (only when that page is opened), not on every login.
 async function fetchAllQuestionsForEditors() {
-  const { data, error } = await supabase.from("questions").select(QUESTION_SELECT).order("updated_at", { ascending: false });
-  if (error) throw error;
-  return (data || []).map(shapeQuestion);
+  try {
+    const { data, error } = await supabase.from("questions").select(QUESTION_SELECT).order("updated_at", { ascending: false });
+    if (error) throw error;
+    return (data || []).map(shapeQuestion);
+  } catch {
+    const { data, error } = await supabase.from("questions").select(QUESTION_SELECT_BASE).order("updated_at", { ascending: false });
+    if (error) throw error;
+    return (data || []).map(shapeQuestion);
+  }
 }
 
 // So the inbox can show which learner asked, and any reply can show a real identity
@@ -1008,13 +1082,21 @@ async function fetchAllProfilesLite() {
   return data || [];
 }
 
-async function askQuestion(userId, topicId, text) {
-  const { data, error } = await supabase.from("questions")
-    .insert({ user_id: userId, topic_id: topicId, text, normalized_text: normalizeQuestionText(text), status: "waiting" })
-    .select(QUESTION_SELECT)
-    .single();
-  if (error) throw error;
-  return shapeQuestion(data);
+// `kind` defaults to a plain learner question; the "Submit for Review" flow (see
+// SubmitForReviewModal) is the only caller that passes `"review"`.
+async function askQuestion(userId, topicId, text, kind = "question") {
+  const basePayload = { user_id: userId, topic_id: topicId, text, normalized_text: normalizeQuestionText(text), status: "waiting" };
+  try {
+    const { data, error } = await supabase.from("questions").insert({ ...basePayload, kind }).select(QUESTION_SELECT).single();
+    if (error) throw error;
+    return shapeQuestion(data);
+  } catch {
+    // `kind` column missing on this project — insert without it rather than failing
+    // the ask entirely; this row will just read back as an ordinary question.
+    const { data, error } = await supabase.from("questions").insert(basePayload).select(QUESTION_SELECT_BASE).single();
+    if (error) throw error;
+    return shapeQuestion(data);
+  }
 }
 
 // Adds a reply and moves the conversation into whichever court it now belongs in: an
@@ -1296,14 +1378,17 @@ function Hub({ session, profile }) {
   }
 
   // Optimistic: a new conversation appears instantly; reverted if the write fails.
-  async function handleAskQuestion(topicId, text) {
+  // `kind` defaults to a plain learner question; SubmitForReviewModal is the only
+  // caller that passes "review" (see requiresTrainerReview / the auto-complete effect
+  // below, which watches specifically for review-kind conversations being resolved).
+  async function handleAskQuestion(topicId, text, kind = "question") {
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const now = new Date().toISOString();
-    const optimistic = { id: tempId, userId: session.user.id, topicId, text, status: "waiting", createdAt: now, updatedAt: now, replies: [] };
+    const optimistic = { id: tempId, userId: session.user.id, topicId, text, status: "waiting", kind, createdAt: now, updatedAt: now, replies: [] };
     setMyQuestions(prev => [...prev, optimistic]);
     if (isEditor) setAllQuestions(prev => [...prev, optimistic]);
     try {
-      const saved = await askQuestion(session.user.id, topicId, text);
+      const saved = await askQuestion(session.user.id, topicId, text, kind);
       patchQuestion(tempId, () => saved);
     } catch (err) {
       setMyQuestions(prev => prev.filter(q => q.id !== tempId));
@@ -1548,12 +1633,35 @@ function Hub({ session, profile }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topics, highestMilestoneIdx, currentLevelIdx]);
+
+  // Practical exercises: once the review conversation is resolved, treat the topic as
+  // complete automatically — for a practical exercise, "the trainer wrapped up their
+  // review" is the natural completion signal, not a separate manual step. This only
+  // ever reacts to a review-kind conversation (see requiresTrainerReview / the `kind`
+  // param on askQuestion) — an ordinary learner question about the same topic being
+  // resolved never triggers it. The existing "Mark as complete" toggle still works
+  // exactly as before for every topic, standard or practical; this is purely additive.
+  useEffect(() => {
+    if (!topics) return;
+    myQuestions.forEach(q => {
+      if (q.kind === "review" && q.status === "resolved" && !progress[q.topicId]) {
+        setProgress(p => (p[q.topicId] ? p : { ...p, [q.topicId]: true }));
+        setProgressRow(session.user.id, q.topicId, true).catch(() => {
+          // Worst case the learner just uses "Mark as complete" manually — not worth a
+          // toast over a background convenience.
+        });
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myQuestions, topics]);
+
   function startEdit(topic) { setEditDraft(JSON.parse(JSON.stringify(topic))); }
   function startNewTopic() {
     setEditDraft({
       id: "topic-" + uid(), icon: "file", category: DEFAULT_TOPIC_CATEGORY,
       order: (topics?.length || 0) + 1, title: "", description: "", estimatedTime: DEFAULT_ESTIMATED_MINUTES,
       slides: [{ id: uid(), title: "", bullets: [""] }], links: [], ticketLinks: [], tips: [], quiz: [],
+      completionType: "standard", requiresReview: false, attachmentType: DEFAULT_ATTACHMENT_TYPE, reviewTemplate: "",
     });
   }
   async function saveDraft() {
@@ -2689,6 +2797,13 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
   const [quizAnswers, setQuizAnswers] = useState({});
   const [quizResult, setQuizResult] = useState(null);
   const hasQuiz = topic.quiz && topic.quiz.length > 0;
+  // Practical exercise / review workflow — see requiresTrainerReview. `reviewQuestion`
+  // is the one existing "Submit for Review" conversation for this topic, if any (kept
+  // separate from the learner's ordinary questions about the same topic via `kind`).
+  const [showSubmitReviewModal, setShowSubmitReviewModal] = useState(false);
+  const practicalReview = requiresTrainerReview(topic);
+  const isLastSlide = slideIdx === topic.slides.length - 1;
+  const reviewQuestion = questions.find(q => q.topicId === topic.id && q.kind === "review") || null;
 
   function pickAnswer(qId, optIdx) {
     if (quizResult) return;
@@ -2701,6 +2816,12 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
     try { await saveQuizScore(userId, topic.id, correct, total); } catch {}
   }
   function retryQuiz() { setQuizAnswers({}); setQuizResult(null); }
+
+  async function handleSubmitForReview(text) {
+    await onAskQuestion(topic.id, text, "review");
+    setShowSubmitReviewModal(false);
+    showToast("Sent for review!");
+  }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(30,60,71,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 }} onClick={onClose}>
@@ -2737,15 +2858,21 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
           {!quizMode && (
             <>
               <div style={{ background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "28px 26px", minHeight: 180 }}>
-                <div style={{ fontSize: 11, color: BRAND.teal, marginBottom: 10, fontWeight: 500 }}>Slide {slideIdx + 1} of {topic.slides.length}</div>
-                <h3 style={{ margin: "0 0 14px", fontSize: 18, fontWeight: 700, color: BRAND.darkTeal }}>{slide.title}</h3>
-                <div style={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}>
-                  <ContentBlocks
-                    lines={slide.bullets}
-                    pStyle={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}
-                    listStyle={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}
-                  />
-                </div>
+                {practicalReview && isLastSlide ? (
+                  <SubmitForReviewPanel topic={topic} reviewQuestion={reviewQuestion} onOpenSubmit={() => setShowSubmitReviewModal(true)} />
+                ) : (
+                  <>
+                    <div style={{ fontSize: 11, color: BRAND.teal, marginBottom: 10, fontWeight: 500 }}>Slide {slideIdx + 1} of {topic.slides.length}</div>
+                    <h3 style={{ margin: "0 0 14px", fontSize: 18, fontWeight: 700, color: BRAND.darkTeal }}>{slide.title}</h3>
+                    <div style={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}>
+                      <ContentBlocks
+                        lines={slide.bullets}
+                        pStyle={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}
+                        listStyle={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14.5 }}
+                      />
+                    </div>
+                  </>
+                )}
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
                 <button disabled={slideIdx === 0} onClick={() => setSlideIdx(i => Math.max(0, i - 1))} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "6px 12px", color: slideIdx === 0 ? "#B7BDC0" : BRAND.darkTeal, display: "flex", alignItems: "center", gap: 4, fontSize: 13 }}><ChevronLeft size={14} /> Previous</button>
@@ -2879,11 +3006,148 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
           </button>
         </div>
       </div>
+
+      {showSubmitReviewModal && (
+        <SubmitForReviewModal topic={topic} onClose={() => setShowSubmitReviewModal(false)} onSubmit={handleSubmitForReview} />
+      )}
     </div>
   );
 }
 
-// ---------- My Questions (learner's personal mentoring history) ----------
+// ---------- Practical exercise: Submit for Review ----------
+// Shown in place of the final slide's normal content when a topic is configured as a
+// practical exercise requiring trainer review (see requiresTrainerReview). Purely
+// data-driven — nothing here is specific to any one topic (Blog, Business Website, or
+// any future exercise all render the exact same way from their own configuration).
+function SubmitForReviewPanel({ topic, reviewQuestion, onOpenSubmit }) {
+  if (reviewQuestion) {
+    const meta = QUESTION_STATUS_META[reviewQuestion.status];
+    return (
+      <div style={{ textAlign: "center", padding: "20px 10px" }}>
+        <div style={{ fontSize: 28, marginBottom: 10 }}>{meta.emoji}</div>
+        <h3 style={{ margin: "0 0 8px", fontSize: 18, fontWeight: 700, color: BRAND.darkTeal }}>Submitted for review</h3>
+        <p style={{ margin: 0, fontSize: 13.5, color: BRAND.teal, lineHeight: 1.6 }}>
+          Status: <strong style={{ color: meta.color }}>{meta.label}</strong>. Scroll down to see the conversation and your trainer's feedback.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div style={{ textAlign: "center", padding: "6px 6px 10px" }}>
+      <div style={{ fontSize: 30, marginBottom: 8 }}>🤝</div>
+      <h3 style={{ margin: "0 0 10px", fontSize: 19, fontWeight: 700, color: BRAND.darkTeal }}>Submit for Review</h3>
+      <p style={{ margin: "0 0 14px", fontSize: 14, color: BRAND.darkTeal, lineHeight: 1.7 }}>
+        <strong>Congratulations!</strong> You've completed the practical exercise.<br />
+        Learning doesn't stop here. Share your work with your trainer and ask for feedback before moving on.
+      </p>
+      <div style={{ background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 10, padding: "14px 18px", margin: "0 0 14px", textAlign: "left", fontSize: 13.5, color: BRAND.darkTeal, lineHeight: 1.9 }}>
+        <div style={{ fontWeight: 700, marginBottom: 4 }}>Your trainer will:</div>
+        <div>✅ Review your work</div>
+        <div>💬 Share feedback and suggestions</div>
+        <div>❓ Answer any remaining questions</div>
+      </div>
+      <p style={{ margin: "0 0 18px", fontSize: 12.5, color: BRAND.teal, lineHeight: 1.6, fontStyle: "italic" }}>
+        Remember: the goal isn't to build a perfect {topic.title.toLowerCase()}. The goal is to gain experience and learn from feedback.
+      </p>
+      <button onClick={onOpenSubmit} className="onb-btn" style={{ background: BRAND.darkTeal, color: BRAND.white, border: "none", borderRadius: 10, padding: "12px 20px", fontSize: 14, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 8 }}>
+        📩 Submit for Review
+      </button>
+    </div>
+  );
+}
+
+// The dialog that turns a completed practical exercise into the first message of a
+// mentoring conversation (see Questions Integration — this calls the exact same
+// askQuestion/onAskQuestion path as an ordinary question, just tagged kind: "review").
+// The attachment field shown is entirely driven by the topic's configured
+// attachmentType; the message itself is generated from the topic's reviewTemplate and
+// re-generated live as the learner fills in the attachment, unless they've started
+// editing the message directly (in which case their edits are respected).
+function SubmitForReviewModal({ topic, onClose, onSubmit }) {
+  const attachmentType = getAttachmentType(topic);
+  const attachmentMeta = ATTACHMENT_TYPE_MAP[attachmentType];
+  const template = getReviewTemplate(topic);
+  const [attachmentValue, setAttachmentValue] = useState("");
+  const [message, setMessage] = useState(fillReviewTemplate(template, ""));
+  const [messageEdited, setMessageEdited] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  function handleAttachmentChange(value) {
+    setAttachmentValue(value);
+    if (!messageEdited) setMessage(fillReviewTemplate(template, value));
+  }
+
+  async function handleSend() {
+    if (!message.trim() || sending) return;
+    setSending(true);
+    try {
+      await onSubmit(message.trim());
+    } finally {
+      setSending(false);
+    }
+  }
+
+  const inputStyle = { width: "100%", boxSizing: "border-box", background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, color: BRAND.darkTeal, padding: "9px 12px", fontSize: 13.5, fontFamily: font };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,60,71,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 20 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: BRAND.white, borderRadius: 16, width: "100%", maxWidth: 520, maxHeight: "88vh", overflowY: "auto" }}>
+        <div style={{ padding: "18px 22px", borderBottom: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: BRAND.darkTeal }}>📩 Submit for Review</h3>
+          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal }}><X size={18} /></button>
+        </div>
+
+        <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 14 }}>
+          {attachmentType !== "none" && (
+            <div>
+              <label style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: BRAND.teal, marginBottom: 5, display: "block", fontWeight: 700 }}>
+                {attachmentMeta.label}
+              </label>
+              {attachmentMeta.inputType === "textarea" ? (
+                <textarea
+                  autoFocus
+                  style={{ ...inputStyle, minHeight: 80, resize: "vertical" }}
+                  placeholder={attachmentMeta.placeholder}
+                  value={attachmentValue}
+                  onChange={e => handleAttachmentChange(e.target.value)}
+                />
+              ) : (
+                <input
+                  autoFocus
+                  type={attachmentMeta.inputType === "url" ? "url" : "text"}
+                  style={inputStyle}
+                  placeholder={attachmentMeta.placeholder}
+                  value={attachmentValue}
+                  onChange={e => handleAttachmentChange(e.target.value)}
+                />
+              )}
+            </div>
+          )}
+
+          <div>
+            <label style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: BRAND.teal, marginBottom: 5, display: "block", fontWeight: 700 }}>
+              Message to your trainer
+            </label>
+            <textarea
+              style={{ ...inputStyle, minHeight: 140, resize: "vertical" }}
+              value={message}
+              onChange={e => { setMessage(e.target.value); setMessageEdited(true); }}
+            />
+          </div>
+        </div>
+
+        <div style={{ padding: "16px 22px", borderTop: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, color: BRAND.teal, borderRadius: 8, padding: "9px 16px", fontSize: 13 }}>Cancel</button>
+          <button onClick={handleSend} disabled={sending || !message.trim()} className="onb-btn" style={{ background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, opacity: sending || !message.trim() ? 0.6 : 1, display: "flex", alignItems: "center", gap: 6 }}>
+            <Check size={14} /> {sending ? "Sending…" : "Send"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 // Every conversation this learner has ever started, across every topic. Per the design
 // goal, conversations never disappear — this is deliberately their whole history, not
 // just open items, with filters to narrow it down.
@@ -3313,6 +3577,74 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                 <Plus size={14} /> Add quiz question
               </button>
             </div>
+          </div>
+
+          <div>
+            <label style={labelStyle}>Completion</label>
+            <p style={{ fontSize: 12, color: BRAND.teal, margin: "0 0 10px" }}>
+              How should this topic end for the learner?
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: BRAND.darkTeal, cursor: "pointer" }}>
+                <input
+                  type="radio"
+                  name="completion-type"
+                  checked={(draft.completionType || "standard") !== "practical"}
+                  onChange={() => update("completionType", "standard")}
+                />
+                Standard lesson
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: BRAND.darkTeal, cursor: "pointer" }}>
+                <input
+                  type="radio"
+                  name="completion-type"
+                  checked={draft.completionType === "practical"}
+                  onChange={() => update("completionType", "practical")}
+                />
+                Practical exercise
+              </label>
+            </div>
+
+            {draft.completionType === "practical" && (
+              <div style={{ background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: BRAND.darkTeal, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!draft.requiresReview}
+                    onChange={e => update("requiresReview", e.target.checked)}
+                  />
+                  Requires trainer review
+                </label>
+
+                {draft.requiresReview && (
+                  <>
+                    <div>
+                      <label style={labelStyle}>Attachment</label>
+                      <select
+                        style={inputStyle}
+                        value={getAttachmentType(draft)}
+                        onChange={e => update("attachmentType", e.target.value)}
+                      >
+                        {ATTACHMENT_TYPES.map(a => (
+                          <option key={a.key} value={a.key}>{a.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={labelStyle}>Review request template</label>
+                      <p style={{ fontSize: 11.5, color: BRAND.teal, margin: "0 0 6px" }}>
+                        Use <code>{"{{attachment}}"}</code> where the learner's answer should be inserted.
+                      </p>
+                      <textarea
+                        style={{ ...inputStyle, minHeight: 130, resize: "vertical", fontFamily: font }}
+                        value={getReviewTemplate(draft)}
+                        onChange={e => update("reviewTemplate", e.target.value)}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
