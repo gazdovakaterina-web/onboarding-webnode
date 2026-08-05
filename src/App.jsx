@@ -9,7 +9,7 @@ import {
   Database, FileSpreadsheet, Settings, Lock, ShieldCheck, Bell, MapPin,
   Award, Lightbulb, LogOut, Sparkles,
   Bold, Italic, List, ListOrdered, Heading2, Image as ImageIcon, Link as LinkIcon, Clock,
-  Underline, Quote, Undo, Redo, Heading3, ListTodo,
+  Underline, Quote, Undo, Redo, Heading3, ListTodo, Video,
 } from "lucide-react";
 
 const BRAND = {
@@ -434,6 +434,13 @@ function parseContentLines(lines) {
       return;
     }
 
+    const videoData = decodeVideoLine(line);
+    if (videoData) {
+      closeList();
+      blocks.push({ type: "video", video: videoData });
+      return;
+    }
+
     const headingMatch = line.match(/^(#{1,3})\s+(.*)$/);
     const bulletMatch = line.match(/^[-*]\s+(.*)$/);
     const numberMatch = line.match(/^\d+\.\s+(.*)$/);
@@ -464,6 +471,131 @@ function parseContentLines(lines) {
   while (blocks.length && blocks[blocks.length - 1].type === "space") blocks.pop();
 
   return blocks;
+}
+
+// ---------- Video embeds ----------
+// Videos are a block-level element (their own aspect-ratio box, optional title/caption)
+// rather than inline markdown like images/links, so they're handled at the same level
+// as headings/lists in parseContentLines above, not inside renderInline. To keep the
+// existing "array of plain-text lines" content model completely unchanged, a video is
+// stored as ONE line of that array: a unique, unmistakable prefix followed by compact
+// JSON — e.g. `%%WNVIDEO%%{"provider":"youtube","url":"...","embedUrl":"...",...}`.
+// This is what the prompt's "store structured data, not just final iframe HTML" maps to
+// here: the structured shape is exactly { provider, url, embedUrl, title, caption }, it's
+// just serialized into the one line slot this architecture already uses for content.
+// No existing line of real content will ever start with this prefix, so this is fully
+// backward compatible — every other line keeps parsing exactly as it did before.
+const VIDEO_LINE_PREFIX = "%%WNVIDEO%%";
+
+// Only these exact hostnames are ever allowed to become an iframe src — both when
+// building a new embed URL and (defensively, again) at render time in VideoEmbed. This
+// is what prevents arbitrary iframe/HTML injection via a crafted or tampered-with URL.
+const ALLOWED_EMBED_HOSTS = ["www.youtube.com", "player.vimeo.com", "www.loom.com"];
+
+function detectVideoProvider(rawUrl) {
+  let host;
+  try { host = new URL(rawUrl.trim()).hostname.replace(/^www\./, "").toLowerCase(); }
+  catch { return null; }
+  if (host === "youtube.com" || host === "m.youtube.com" || host === "youtu.be") return "youtube";
+  if (host === "vimeo.com") return "vimeo";
+  if (host === "loom.com") return "loom";
+  return null;
+}
+
+// Turns a normal share URL into the matching embeddable URL, or null if no video ID
+// could be found in it (e.g. a channel link, a search results page, etc).
+function buildEmbedUrl(provider, rawUrl) {
+  const u = new URL(rawUrl.trim());
+  if (provider === "youtube") {
+    let id = null;
+    if (u.hostname.replace(/^www\./, "") === "youtu.be") {
+      id = u.pathname.slice(1).split("/")[0];
+    } else {
+      id = u.searchParams.get("v");
+      if (!id && u.pathname.startsWith("/embed/")) id = u.pathname.split("/")[2];
+      if (!id && u.pathname.startsWith("/shorts/")) id = u.pathname.split("/")[2];
+    }
+    return id ? `https://www.youtube.com/embed/${id}` : null;
+  }
+  if (provider === "vimeo") {
+    const match = u.pathname.match(/(\d+)/);
+    return match ? `https://player.vimeo.com/video/${match[1]}` : null;
+  }
+  if (provider === "loom") {
+    const parts = u.pathname.split("/").filter(Boolean);
+    const id = parts[parts.length - 1];
+    return id ? `https://www.loom.com/embed/${id}` : null;
+  }
+  return null;
+}
+
+// The single source of truth for "is this URL insertable as a video embed". Used by the
+// editor dialog before it lets an editor insert anything, and rendering trusts nothing
+// it hasn't re-validated itself (see VideoEmbed) — so even a hand-edited or legacy-data
+// URL can never produce an arbitrary iframe.
+function parseVideoUrl(rawUrl) {
+  const url = (rawUrl || "").trim();
+  if (!url) return { ok: false, error: "Enter a video URL." };
+  let parsed;
+  try { parsed = new URL(url); } catch { return { ok: false, error: "That doesn't look like a valid URL." }; }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { ok: false, error: "Only http/https links are supported." };
+  }
+  const provider = detectVideoProvider(url);
+  if (!provider) {
+    return { ok: false, error: "Only YouTube, Vimeo, and Loom links are currently supported." };
+  }
+  const embedUrl = buildEmbedUrl(provider, url);
+  if (!embedUrl || !isSafeEmbedUrl(embedUrl)) {
+    return { ok: false, error: "Couldn't find a video in that link — make sure it's a share link to a single video, not a channel or search page." };
+  }
+  return { ok: true, provider, url, embedUrl };
+}
+
+// Re-checked at render time (never trust stored/serialized data blindly) — this is what
+// actually prevents an arbitrary iframe from ever being rendered, independent of
+// whatever validation happened when the video was originally inserted.
+function isSafeEmbedUrl(embedUrl) {
+  try {
+    const u = new URL(embedUrl);
+    return u.protocol === "https:" && ALLOWED_EMBED_HOSTS.includes(u.hostname);
+  } catch { return false; }
+}
+
+function encodeVideoLine({ provider, url, embedUrl, title, caption }) {
+  return VIDEO_LINE_PREFIX + JSON.stringify({ provider, url, embedUrl, title: title || "", caption: caption || "" });
+}
+
+// Returns the parsed { provider, url, embedUrl, title, caption } for a video line, or
+// null for anything else (including a line that merely starts with the prefix but fails
+// to parse as JSON — treated as "not a video line" rather than thrown as an error).
+function decodeVideoLine(line) {
+  if (!line.startsWith(VIDEO_LINE_PREFIX)) return null;
+  try { return JSON.parse(line.slice(VIDEO_LINE_PREFIX.length)); }
+  catch { return null; }
+}
+
+// Responsive 16:9 embed with optional title/caption — the one place an iframe is ever
+// rendered for content. `data` is whatever decodeVideoLine returned, which may be stale
+// or hand-edited, so isSafeEmbedUrl is checked again here regardless of anything that
+// validated it earlier.
+function VideoEmbed({ data, spacing }) {
+  if (!data || !isSafeEmbedUrl(data.embedUrl)) return null;
+  return (
+    <div style={{ margin: `0 0 ${spacing}px` }}>
+      {data.title && <div style={{ fontSize: 13.5, fontWeight: 700, color: BRAND.darkTeal, marginBottom: 8 }}>{data.title}</div>}
+      <div style={{ position: "relative", width: "100%", paddingTop: "56.25%", borderRadius: 10, overflow: "hidden", background: "#000" }}>
+        <iframe
+          src={data.embedUrl}
+          title={data.title || "Embedded video"}
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allowFullScreen
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+        />
+      </div>
+      {data.caption && <div style={{ fontSize: 12.5, color: BRAND.teal, marginTop: 8, fontStyle: "italic" }}>{data.caption}</div>}
+    </div>
+  );
 }
 
 // Matches, in priority order: images, links, bold, italic, inline code, and bare autolinks.
@@ -561,6 +693,9 @@ function ContentBlocks({ lines, pStyle, listStyle, liStyle, spacing = 10, linkCo
             </ol>
           );
         }
+        if (block.type === "video") {
+          return <VideoEmbed key={idx} data={block.video} spacing={spacing} />;
+        }
         // spacer between paragraphs/lists
         return <div key={idx} style={{ height: spacing }} />;
       })}
@@ -641,20 +776,102 @@ function FormattingToolbar({ value, onChange, getTextarea }) {
   const insertLink = () => insertAtCursor("[", "](https://example.com)", "label", true);
   const insertImage = () => insertAtCursor("![", "](https://example.com/image.png)", "description", true);
 
+  // A video is a block-level element (its own aspect-ratio box), not inline markdown
+  // like a link/image, so it doesn't fit wrapSelection/insertAtCursor's "edit around the
+  // cursor" pattern — it's simplest and most predictable to always add it as its own new
+  // block at the end of the content, blank-line-separated (see encodeVideoLine).
+  const [videoDialogOpen, setVideoDialogOpen] = useState(false);
+  const insertVideoBlock = ({ provider, url, embedUrl, title, caption }) => {
+    const line = encodeVideoLine({ provider, url, embedUrl, title, caption });
+    const trimmed = value.replace(/\s+$/, "");
+    const next = trimmed.length ? trimmed + "\n\n" + line + "\n\n" : line + "\n\n";
+    onChange(next);
+    focusAndSelect(next.length, next.length);
+  };
+
   const btnStyle = { background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: "5px 7px", color: BRAND.teal, display: "flex", alignItems: "center", justifyContent: "center" };
 
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
-      <button type="button" onClick={makeBold} className="onb-btn" style={btnStyle} title="Bold"><Bold size={13} /></button>
-      <button type="button" onClick={makeItalic} className="onb-btn" style={btnStyle} title="Italic"><Italic size={13} /></button>
-      <button type="button" onClick={makeHeading} className="onb-btn" style={btnStyle} title="Heading"><Heading2 size={13} /></button>
-      <button type="button" onClick={makeBulletList} className="onb-btn" style={btnStyle} title="Bullet list"><List size={13} /></button>
-      <button type="button" onClick={makeNumberedList} className="onb-btn" style={btnStyle} title="Numbered list"><ListOrdered size={13} /></button>
-      <button type="button" onClick={insertLink} className="onb-btn" style={btnStyle} title="Link"><LinkIcon size={13} /></button>
-      <button type="button" onClick={insertImage} className="onb-btn" style={btnStyle} title="Image"><ImageIcon size={13} /></button>
+    <>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
+        <button type="button" onClick={makeBold} className="onb-btn" style={btnStyle} title="Bold"><Bold size={13} /></button>
+        <button type="button" onClick={makeItalic} className="onb-btn" style={btnStyle} title="Italic"><Italic size={13} /></button>
+        <button type="button" onClick={makeHeading} className="onb-btn" style={btnStyle} title="Heading"><Heading2 size={13} /></button>
+        <button type="button" onClick={makeBulletList} className="onb-btn" style={btnStyle} title="Bullet list"><List size={13} /></button>
+        <button type="button" onClick={makeNumberedList} className="onb-btn" style={btnStyle} title="Numbered list"><ListOrdered size={13} /></button>
+        <button type="button" onClick={insertLink} className="onb-btn" style={btnStyle} title="Link"><LinkIcon size={13} /></button>
+        <button type="button" onClick={insertImage} className="onb-btn" style={btnStyle} title="Image"><ImageIcon size={13} /></button>
+        <button type="button" onClick={() => setVideoDialogOpen(true)} className="onb-btn" style={btnStyle} title="Video"><Video size={13} /></button>
+      </div>
+      {videoDialogOpen && (
+        <VideoInsertDialog
+          onClose={() => setVideoDialogOpen(false)}
+          onInsert={data => { insertVideoBlock(data); setVideoDialogOpen(false); }}
+        />
+      )}
+    </>
+  );
+}
+
+// Small dialog for inserting a video: URL (required, validated + provider-detected via
+// parseVideoUrl), title and caption (both optional). Mirrors the app's other small
+// modals in style. Only ever hands validated { provider, url, embedUrl, title, caption }
+// back to the caller — an invalid/unsupported link never gets past this into content.
+function VideoInsertDialog({ onClose, onInsert }) {
+  const [url, setUrl] = useState("");
+  const [title, setTitle] = useState("");
+  const [caption, setCaption] = useState("");
+  const [error, setError] = useState("");
+
+  function handleInsert() {
+    const result = parseVideoUrl(url);
+    if (!result.ok) { setError(result.error); return; }
+    onInsert({ provider: result.provider, url: result.url, embedUrl: result.embedUrl, title, caption });
+  }
+
+  const inputStyle = { width: "100%", boxSizing: "border-box", background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, color: BRAND.darkTeal, padding: "8px 10px", fontSize: 13.5, fontFamily: font };
+  const labelStyle = { fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: BRAND.teal, marginBottom: 5, display: "block", fontWeight: 700 };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,60,71,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 20 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: BRAND.white, borderRadius: 16, width: "100%", maxWidth: 440 }}>
+        <div style={{ padding: "16px 20px", borderBottom: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: BRAND.darkTeal }}>Insert video</h3>
+          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: "none", color: BRAND.teal }}><X size={16} /></button>
+        </div>
+        <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <label style={labelStyle}>Video URL</label>
+            <input
+              autoFocus type="text" style={inputStyle}
+              placeholder="https://www.youtube.com/watch?v=…"
+              value={url}
+              onChange={e => { setUrl(e.target.value); setError(""); }}
+              onKeyDown={e => { if (e.key === "Enter") handleInsert(); }}
+            />
+            <p style={{ fontSize: 11.5, color: BRAND.teal, margin: "6px 0 0" }}>
+              Paste a normal share link from YouTube, Vimeo, or Loom — not an embed code.
+            </p>
+            {error && <p style={{ fontSize: 12, color: "#C0392B", margin: "6px 0 0" }}>{error}</p>}
+          </div>
+          <div>
+            <label style={labelStyle}>Title (optional)</label>
+            <input type="text" style={inputStyle} value={title} onChange={e => setTitle(e.target.value)} placeholder="Shown above the video" />
+          </div>
+          <div>
+            <label style={labelStyle}>Caption (optional)</label>
+            <input type="text" style={inputStyle} value={caption} onChange={e => setCaption(e.target.value)} placeholder="Shown below the video" />
+          </div>
+        </div>
+        <div style={{ padding: "14px 20px", borderTop: `1px solid ${BRAND.sandBorder}`, display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button onClick={onClose} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, color: BRAND.teal, borderRadius: 8, padding: "8px 14px", fontSize: 13 }}>Cancel</button>
+          <button onClick={handleInsert} className="onb-btn" style={{ background: BRAND.lime, border: "none", color: BRAND.darkTeal, borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700 }}>Insert</button>
+        </div>
+      </div>
     </div>
   );
 }
+
 
 // ---------- Global search ----------
 // Searches across everything the app stores for a topic: title, description, slide
