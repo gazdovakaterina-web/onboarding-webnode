@@ -1041,6 +1041,52 @@ function fillReviewTemplate(template, attachmentValue) {
   return template.replace(/\{\{attachment\}\}/g, value || "___");
 }
 
+// ---------- Topic Mentor ----------
+// An optional "who owns this topic" card. Stored as a single `topic.mentor` object
+// ({ photoDataUrl, name, role, message }) inside the topic's existing jsonb `data` — no
+// schema change, and a topic saved before this feature existed simply has no `mentor`
+// field, which getTopicMentor treats as "nothing configured, show nothing".
+function getTopicMentor(topic) {
+  const m = topic?.mentor;
+  if (!m) return null;
+  const hasContent = [m.photoDataUrl, m.name, m.role, m.message].some(v => v && v.trim());
+  return hasContent ? m : null;
+}
+
+// There's no file-storage backend in this app, so "upload a photo" is implemented by
+// reading the file client-side, downscaling it to a small square via canvas, and
+// storing the result as a compact JPEG data URL directly in the topic's data — plenty
+// for a circular profile photo, with no backend changes needed.
+function readImageFileAsDataUrl(file, maxSize = 160, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Couldn't read that file."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("That doesn't look like a valid image."));
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Pre-fills the mentor card's "Ask a Question" button — topic association is already
+// automatic (askQuestion always carries the topic's id), so this template only needs to
+// name the topic for the human reading it, not identify it for the system.
+function buildMentorQuestionTemplate(topic) {
+  return `Hi!\nI have a question about the topic:\n${topic.title}\n\nQuestion:\n`;
+}
+
 // ---------- Learning Points (XP) ----------
 // Product Academy's progress bar is driven by weighted XP rather than a raw topic count
 // or a sum of estimated minutes — a 5-minute topic and a 45-minute topic shouldn't move
@@ -2922,13 +2968,25 @@ function ConversationThread({ question, topicTitle, onOpenTopic, learnerLabel, p
 // learner start a new one. Topic-aware by construction: since this lives inside
 // TopicViewer, the topic is already known, so the learner never has to say what it's
 // about (see the feature's "Topic Awareness" goal).
-function QuestionsSection({ userId, topicId, questions, profilesById, onAsk, onReply, onSetStatus, showToast }) {
+function QuestionsSection({ sectionRef, userId, topicId, questions, profilesById, onAsk, onReply, onSetStatus, showToast, initialDraftRequest, onDraftRequestHandled }) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const inputRef = useRef(null);
 
   useEffect(() => { if (adding && inputRef.current) inputRef.current.focus(); }, [adding]);
+
+  // Lets something outside this component (the Topic Mentor card's "Ask a Question"
+  // button) open the ask box pre-filled with a specific message — the same mechanism
+  // the Notebook's "insert heading" request uses: keyed on `key` (not `text`) so asking
+  // twice in a row with the same text still re-triggers.
+  useEffect(() => {
+    if (!initialDraftRequest) return;
+    setDraft(initialDraftRequest.text);
+    setAdding(true);
+    onDraftRequestHandled && onDraftRequestHandled();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDraftRequest && initialDraftRequest.key]);
 
   const topicQuestions = questions.filter(q => q.topicId === topicId).slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
 
@@ -2947,7 +3005,7 @@ function QuestionsSection({ userId, topicId, questions, profilesById, onAsk, onR
   }
 
   return (
-    <div style={{ marginTop: 24, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "18px 20px" }}>
+    <div ref={sectionRef} style={{ marginTop: 24, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "18px 20px" }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
         <div>
           <h4 style={{ fontSize: 14, fontWeight: 700, color: BRAND.darkTeal, margin: "0 0 4px" }}>💬 Questions</h4>
@@ -2966,23 +3024,25 @@ function QuestionsSection({ userId, topicId, questions, profilesById, onAsk, onR
 
       {adding && (
         <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-          <input
+          <textarea
             ref={inputRef}
-            type="text"
             value={draft}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
-              if (e.key === "Enter") { e.preventDefault(); handleAsk(); }
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleAsk(); }
               if (e.key === "Escape") { setDraft(""); setAdding(false); }
             }}
             placeholder="e.g. why can't I connect Google Search Console on a Free website?"
             disabled={sending}
-            style={{ flex: 1, background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, color: BRAND.darkTeal, padding: "9px 12px", fontSize: 13.5, boxSizing: "border-box", fontFamily: font }}
+            rows={draft.includes("\n") ? 5 : 2}
+            style={{ flex: 1, resize: "vertical", background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, color: BRAND.darkTeal, padding: "9px 12px", fontSize: 13.5, boxSizing: "border-box", fontFamily: font }}
           />
-          <button onClick={handleAsk} disabled={sending} className="onb-btn" style={{ background: BRAND.darkTeal, border: "none", borderRadius: 8, padding: "0 14px", color: BRAND.white, fontSize: 13, fontWeight: 600, opacity: sending ? 0.6 : 1 }}>Ask</button>
-          <button onClick={() => { setDraft(""); setAdding(false); }} title="Cancel" className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", color: BRAND.teal, display: "flex", alignItems: "center" }}>
-            <X size={14} />
-          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <button onClick={handleAsk} disabled={sending || !draft.trim()} className="onb-btn" style={{ background: BRAND.darkTeal, border: "none", borderRadius: 8, padding: "0 14px", height: 34, color: BRAND.white, fontSize: 13, fontWeight: 600, opacity: sending || !draft.trim() ? 0.6 : 1 }}>Ask</button>
+            <button onClick={() => { setDraft(""); setAdding(false); }} title="Cancel" className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", height: 34, color: BRAND.teal, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <X size={14} />
+            </button>
+          </div>
         </div>
       )}
 
@@ -3008,6 +3068,49 @@ function QuestionsSection({ userId, topicId, questions, profilesById, onAsk, onR
 }
 
 
+// Small, compact "who owns this topic" card — shown near the bottom of the lesson,
+// just above the Quiz (or above the completion action if there's no quiz). Renders
+// nothing at all when no mentor is configured (see getTopicMentor), so existing topics
+// show no empty space or placeholder.
+function TopicMentorCard({ mentor, ongoingCount, onAskQuestion }) {
+  if (!mentor) return null;
+  const initials = (mentor.name || "").trim().split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("");
+
+  return (
+    <div style={{ marginTop: 22, background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        {mentor.photoDataUrl ? (
+          <img src={mentor.photoDataUrl} alt={mentor.name || "Topic mentor"} style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+        ) : (
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: BRAND.tealSoft, color: BRAND.teal, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, flexShrink: 0 }}>
+            {initials || <Users size={18} />}
+          </div>
+        )}
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", color: BRAND.teal, fontWeight: 700, marginBottom: 2 }}>Topic Mentor</div>
+          {mentor.name && <div style={{ fontSize: 14.5, fontWeight: 700, color: BRAND.darkTeal, lineHeight: 1.3 }}>{mentor.name}</div>}
+          {mentor.role && <div style={{ fontSize: 12.5, color: BRAND.teal, lineHeight: 1.3 }}>{mentor.role}</div>}
+        </div>
+      </div>
+
+      {mentor.message && (
+        <p style={{ margin: 0, fontSize: 13.5, color: BRAND.darkTeal, lineHeight: 1.6 }}>{mentor.message}</p>
+      )}
+
+      {ongoingCount > 0 && (
+        <div style={{ alignSelf: "flex-start", fontSize: 12, color: BRAND.teal, background: BRAND.tealSoft, borderRadius: 999, padding: "5px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+          💬 You have {ongoingCount} ongoing conversation{ongoingCount === 1 ? "" : "s"} about this topic.
+        </div>
+      )}
+
+      <button onClick={onAskQuestion} className="onb-btn" style={{ alignSelf: "flex-start", background: BRAND.darkTeal, color: BRAND.white, border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+        📩 Ask a Question
+      </button>
+    </div>
+  );
+}
+
+
 function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone, editMode, onEdit, userId, questions, profilesById, onAskQuestion, onReplyToQuestion, onSetQuestionStatus, showToast, linkStatesByUrl, onVisitLink, positionInCategory, onAddNoteForTopic }) {
   const slide = topic.slides[slideIdx] || topic.slides[0];
   const [quizMode, setQuizMode] = useState(false);
@@ -3021,6 +3124,22 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
   const practicalReview = requiresTrainerReview(topic);
   const isLastSlide = slideIdx === topic.slides.length - 1;
   const reviewQuestion = questions.find(q => q.topicId === topic.id && q.kind === "review") || null;
+
+  // Topic Mentor — see getTopicMentor / TopicMentorCard. `mentorAskRequest` reuses the
+  // exact same keyed-request pattern as the Notebook's "insert heading" and the
+  // practical-exercise review flow: clicking "Ask a Question" on the mentor card just
+  // pre-fills and opens QuestionsSection's own ask box below — no separate dialog, no
+  // separate messaging system.
+  const mentor = getTopicMentor(topic);
+  const ongoingCount = questions.filter(q => q.topicId === topic.id && q.status !== "resolved").length;
+  const [mentorAskRequest, setMentorAskRequest] = useState(null);
+  const questionsSectionRef = useRef(null);
+  function handleAskMentorQuestion() {
+    setMentorAskRequest({ text: buildMentorQuestionTemplate(topic), key: uid() });
+    requestAnimationFrame(() => {
+      questionsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
 
   function pickAnswer(qId, optIdx) {
     if (quizResult) return;
@@ -3151,6 +3270,8 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
                 </div>
               )}
 
+              <TopicMentorCard mentor={mentor} ongoingCount={ongoingCount} onAskQuestion={handleAskMentorQuestion} />
+
               {hasQuiz && (
                 <button onClick={() => { setQuizMode(true); retryQuiz(); }} className="onb-btn" style={{ marginTop: 22, width: "100%", background: BRAND.darkTeal, color: BRAND.white, border: "none", borderRadius: 10, padding: "12px", fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
                   <Zap size={16} color={BRAND.lime} /> Test your knowledge ({topic.quiz.length} question{topic.quiz.length > 1 ? "s" : ""})
@@ -3158,9 +3279,12 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
               )}
 
               <QuestionsSection
+                sectionRef={questionsSectionRef}
                 userId={userId} topicId={topic.id} questions={questions} profilesById={profilesById}
                 onAsk={onAskQuestion} onReply={onReplyToQuestion} onSetStatus={onSetQuestionStatus}
                 showToast={showToast}
+                initialDraftRequest={mentorAskRequest}
+                onDraftRequestHandled={() => setMentorAskRequest(null)}
               />
             </>
           )}
@@ -3589,6 +3713,19 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
   function updateTicketLink(i, field, value) { update("ticketLinks", draft.ticketLinks.map((l, idx) => idx === i ? { ...l, [field]: value } : l)); }
   function removeTicketLink(i) { update("ticketLinks", draft.ticketLinks.filter((_, idx) => idx !== i)); }
 
+  function updateMentorField(field, value) { update("mentor", { ...(draft.mentor || {}), [field]: value }); }
+  async function handleMentorPhotoUpload(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // always allow re-selecting the same file afterward
+    if (!file) return;
+    try {
+      const dataUrl = await readImageFileAsDataUrl(file);
+      updateMentorField("photoDataUrl", dataUrl);
+    } catch {
+      // A bad image file shouldn't block editing the rest of the topic — just skip it.
+    }
+  }
+
   const quiz = draft.quiz || [];
   function addQuestion() { update("quiz", [...quiz, { id: uid(), question: "", options: ["", ""], correct: 0 }]); }
   function updateQuestion(i, field, value) { update("quiz", quiz.map((q, idx) => idx === i ? { ...q, [field]: value } : q)); }
@@ -3862,6 +3999,54 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                 )}
               </div>
             )}
+          </div>
+
+          <div>
+            <label style={labelStyle}>
+              Topic Mentor <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(optional)</span>
+            </label>
+            <p style={{ fontSize: 12, color: BRAND.teal, margin: "0 0 10px" }}>
+              Give this topic a real point of contact. Leave every field blank and nothing shows to learners.
+            </p>
+            <div style={{ background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                {draft.mentor?.photoDataUrl ? (
+                  <img src={draft.mentor.photoDataUrl} alt="" style={{ width: 48, height: 48, borderRadius: "50%", objectFit: "cover" }} />
+                ) : (
+                  <div style={{ width: 48, height: 48, borderRadius: "50%", background: BRAND.tealSoft, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <Users size={20} color={BRAND.teal} />
+                  </div>
+                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <label className="onb-btn" style={{ fontSize: 12, color: BRAND.teal, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: "5px 10px", background: BRAND.white, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, width: "fit-content" }}>
+                    <ImageIcon size={13} /> {draft.mentor?.photoDataUrl ? "Change photo" : "Upload photo"}
+                    <input type="file" accept="image/*" onChange={handleMentorPhotoUpload} style={{ display: "none" }} />
+                  </label>
+                  {draft.mentor?.photoDataUrl && (
+                    <button onClick={() => updateMentorField("photoDataUrl", "")} className="onb-btn" style={{ fontSize: 11.5, color: "#C0392B", background: "transparent", border: "none", padding: 0, textAlign: "left" }}>
+                      Remove photo
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Full name</label>
+                <input style={inputStyle} value={draft.mentor?.name || ""} onChange={e => updateMentorField("name", e.target.value)} placeholder="e.g. Anna Novak" />
+              </div>
+              <div>
+                <label style={labelStyle}>Role / Title</label>
+                <input style={inputStyle} value={draft.mentor?.role || ""} onChange={e => updateMentorField("role", e.target.value)} placeholder="e.g. Product Trainer" />
+              </div>
+              <div>
+                <label style={labelStyle}>Message (optional)</label>
+                <textarea
+                  style={{ ...inputStyle, minHeight: 70, resize: "vertical" }}
+                  value={draft.mentor?.message || ""}
+                  onChange={e => updateMentorField("message", e.target.value)}
+                  placeholder="I'm responsible for this topic. If something isn't clear, don't hesitate to ask!"
+                />
+              </div>
+            </div>
           </div>
         </div>
 
