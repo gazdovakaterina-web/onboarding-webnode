@@ -502,19 +502,27 @@ function detectVideoProvider(rawUrl) {
   return null;
 }
 
+// Extracts a YouTube video ID from any of the supported share-URL shapes: a normal
+// watch URL, a youtu.be short link, an /embed/ URL, or a /shorts/ URL. Shared by the
+// content-editor's generic video embed (buildEmbedUrl below) and Video lessons (see
+// "Video lessons" section further down), so this parsing exists in exactly one place.
+function extractYouTubeVideoId(rawUrl) {
+  const u = new URL(rawUrl.trim());
+  if (u.hostname.replace(/^www\./, "") === "youtu.be") {
+    return u.pathname.slice(1).split("/")[0] || null;
+  }
+  let id = u.searchParams.get("v");
+  if (!id && u.pathname.startsWith("/embed/")) id = u.pathname.split("/")[2];
+  if (!id && u.pathname.startsWith("/shorts/")) id = u.pathname.split("/")[2];
+  return id || null;
+}
+
 // Turns a normal share URL into the matching embeddable URL, or null if no video ID
 // could be found in it (e.g. a channel link, a search results page, etc).
 function buildEmbedUrl(provider, rawUrl) {
   const u = new URL(rawUrl.trim());
   if (provider === "youtube") {
-    let id = null;
-    if (u.hostname.replace(/^www\./, "") === "youtu.be") {
-      id = u.pathname.slice(1).split("/")[0];
-    } else {
-      id = u.searchParams.get("v");
-      if (!id && u.pathname.startsWith("/embed/")) id = u.pathname.split("/")[2];
-      if (!id && u.pathname.startsWith("/shorts/")) id = u.pathname.split("/")[2];
-    }
+    const id = extractYouTubeVideoId(rawUrl);
     return id ? `https://www.youtube.com/embed/${id}` : null;
   }
   if (provider === "vimeo") {
@@ -562,6 +570,56 @@ function isSafeEmbedUrl(embedUrl) {
   } catch { return false; }
 }
 
+// ---------- Video lessons ----------
+// A slide can be Text/Slide (the existing default), Video, or — unrelated to this
+// selector, since the quiz is its own separate topic-level mode, unchanged — Quiz.
+// `slide.type` defaults to "text" so every existing slide, which has no `type` field at
+// all, keeps rendering exactly as it always has.
+function getSlideType(slide) {
+  return slide?.type === "video" ? "video" : "text";
+}
+
+// Only YouTube is supported for Video lessons today (unlike the content-editor's
+// generic video embed above, which also allows Vimeo/Loom) — reuses
+// detectVideoProvider/extractYouTubeVideoId rather than re-implementing URL parsing.
+function parseYouTubeLessonUrl(rawUrl) {
+  const url = (rawUrl || "").trim();
+  if (!url) return { ok: false, error: "Enter a YouTube video URL." };
+  let parsed;
+  try { parsed = new URL(url); } catch { return { ok: false, error: "That doesn't look like a valid URL." }; }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { ok: false, error: "Only http/https links are supported." };
+  }
+  if (detectVideoProvider(url) !== "youtube") {
+    return { ok: false, error: "Video lessons currently support YouTube links only (watch, youtu.be, or /shorts/ URLs)." };
+  }
+  const videoId = extractYouTubeVideoId(url);
+  if (!videoId) {
+    return { ok: false, error: "Couldn't find a video ID in that link — make sure it links to a single video, not a channel or search page." };
+  }
+  return { ok: true, url, videoId };
+}
+
+// The auto-generated cover when no custom cover image is provided — YouTube's own
+// thumbnail CDN, at a URL that's fully predictable from the video ID (no API key or
+// backend call needed). This is a plain static image, not a YouTube page: no player
+// chrome, no visible YouTube URL, no branding beyond the thumbnail itself.
+function youtubeThumbnailUrl(videoId) {
+  return `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+}
+
+// Builds the embed URL for the two supported playback modes. `rel=0` and `playsinline=1`
+// apply either way; `autoplay=1` is what makes playback start the instant the iframe is
+// created (for "Play on click", the iframe simply isn't created at all until the click,
+// so this doesn't autoplay anything the learner didn't ask for). Autoplay-with-sound is
+// deliberately not offered — browsers routinely block it, so only the muted variant
+// sets `mute=1`.
+function buildLessonEmbedUrl(videoId, playbackMode) {
+  const params = new URLSearchParams({ autoplay: "1", rel: "0", playsinline: "1" });
+  if (playbackMode === "autoplay-muted") params.set("mute", "1");
+  return `https://www.youtube.com/embed/${videoId}?${params.toString()}`;
+}
+
 function encodeVideoLine({ provider, url, embedUrl, title, caption }) {
   return VIDEO_LINE_PREFIX + JSON.stringify({ provider, url, embedUrl, title: title || "", caption: caption || "" });
 }
@@ -594,6 +652,87 @@ function VideoEmbed({ data, spacing }) {
         />
       </div>
       {data.caption && <div style={{ fontSize: 12.5, color: BRAND.teal, marginTop: 8, fontStyle: "italic" }}>{data.caption}</div>}
+    </div>
+  );
+}
+
+// A Video-type slide's content: optional short description, a branded Learning Hub
+// cover (custom image or an auto-generated YouTube thumbnail) with a centered Play
+// button, and — once playing — the actual embedded player. "Play on click" never
+// creates the iframe until clicked, so no YouTube page/branding/URL is visible before
+// that; "Autoplay muted" skips the cover and mounts the (muted) iframe immediately.
+function VideoLessonBlock({ slide }) {
+  const video = slide.video || {};
+  const [playing, setPlaying] = useState(video.playbackMode === "autoplay-muted");
+  const [coverLoaded, setCoverLoaded] = useState(false);
+
+  // A fresh visit to this slide (a different slide, or the same slide revisited) gets
+  // its own fresh cover state — except autoplay-muted, which should play immediately
+  // every time the lesson opens, per the spec.
+  useEffect(() => {
+    setPlaying(video.playbackMode === "autoplay-muted");
+    setCoverLoaded(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slide.id, video.url, video.playbackMode]);
+
+  const validated = parseYouTubeLessonUrl(video.url);
+  if (!validated.ok) return null; // never render a broken/unvalidated embed to a learner
+
+  const coverUrl = video.coverImageUrl || youtubeThumbnailUrl(validated.videoId);
+  const embedUrl = buildLessonEmbedUrl(validated.videoId, video.playbackMode);
+  const safeEmbedUrl = isSafeEmbedUrl(embedUrl) ? embedUrl : null;
+  const hasTakeaways = Array.isArray(video.keyTakeaways) && video.keyTakeaways.some(l => (l || "").trim());
+
+  return (
+    <div>
+      {video.description && (
+        <p style={{ margin: "0 0 16px", fontSize: 14.5, color: BRAND.darkTeal, lineHeight: 1.7 }}>{video.description}</p>
+      )}
+
+      <div style={{ position: "relative", width: "100%", paddingTop: "56.25%", borderRadius: 12, overflow: "hidden", background: BRAND.darkTeal }}>
+        {playing && safeEmbedUrl ? (
+          <iframe
+            src={safeEmbedUrl}
+            title={slide.title || "Lesson video"}
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+          />
+        ) : (
+          <button
+            onClick={() => setPlaying(true)}
+            className="onb-btn"
+            aria-label="Play video"
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", background: BRAND.darkTeal }}
+          >
+            <img
+              src={coverUrl}
+              alt=""
+              onLoad={() => setCoverLoaded(true)}
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: coverLoaded ? 1 : 0, transition: "opacity .25s ease" }}
+            />
+            {!coverLoaded && <Loader2 size={22} color="rgba(255,255,255,0.7)" className="animate-spin" style={{ position: "relative" }} />}
+            <div style={{ position: "absolute", inset: 0, background: "rgba(30,60,71,0.3)" }} />
+            <div style={{ position: "relative", width: 64, height: 64, borderRadius: "50%", background: BRAND.white, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 6px 18px rgba(0,0,0,0.35)" }}>
+              <div style={{ width: 0, height: 0, borderTop: "12px solid transparent", borderBottom: "12px solid transparent", borderLeft: `20px solid ${BRAND.darkTeal}`, marginLeft: 4 }} />
+            </div>
+            <div style={{ position: "absolute", bottom: 18, left: 0, right: 0, textAlign: "center", fontSize: 13.5, fontWeight: 700, color: BRAND.white, textShadow: "0 1px 4px rgba(0,0,0,0.5)" }}>
+              Watch this lesson
+            </div>
+          </button>
+        )}
+      </div>
+
+      {hasTakeaways && (
+        <div style={{ marginTop: 20 }}>
+          <h4 style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: BRAND.teal, marginBottom: 10, fontWeight: 700 }}>Key Takeaways</h4>
+          <ContentBlocks
+            lines={video.keyTakeaways}
+            pStyle={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14 }}
+            listStyle={{ color: BRAND.darkTeal, lineHeight: 1.8, fontSize: 14 }}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -3196,6 +3335,11 @@ function TopicViewer({ topic, slideIdx, setSlideIdx, onClose, done, onToggleDone
               <div style={{ background: BRAND.sand, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 12, padding: "28px 26px", minHeight: 180 }}>
                 {practicalReview && isLastSlide ? (
                   <SubmitForReviewPanel topic={topic} reviewQuestion={reviewQuestion} onOpenSubmit={() => setShowSubmitReviewModal(true)} />
+                ) : getSlideType(slide) === "video" ? (
+                  <>
+                    {slide.title && <h3 style={{ margin: "0 0 14px", fontSize: 18, fontWeight: 700, color: BRAND.darkTeal }}>{slide.title}</h3>}
+                    <VideoLessonBlock slide={slide} />
+                  </>
                 ) : (
                   <>
                     <div style={{ fontSize: 11, color: BRAND.teal, marginBottom: 10, fontWeight: 500 }}>Slide {slideIdx + 1} of {topic.slides.length}</div>
@@ -3706,6 +3850,28 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
   function updateSlide(i, field, value) { update("slides", draft.slides.map((s, idx) => idx === i ? { ...s, [field]: value } : s)); }
   function addSlide() { update("slides", [...draft.slides, { id: uid(), title: "", bullets: [""] }]); }
   function removeSlide(i) { update("slides", draft.slides.filter((_, idx) => idx !== i)); }
+  function setSlideType(i, type) {
+    update("slides", draft.slides.map((s, idx) => {
+      if (idx !== i) return s;
+      if (type === "video") return { ...s, type: "video", video: s.video || {} };
+      const { video, ...rest } = s; // dropping back to Text/Slide doesn't lose the bullets that were already there
+      return { ...rest, type: "text" };
+    }));
+  }
+  function updateSlideVideo(i, field, value) {
+    update("slides", draft.slides.map((s, idx) => idx === i ? { ...s, video: { ...(s.video || {}), [field]: value } } : s));
+  }
+  async function handleSlideCoverUpload(i, e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const dataUrl = await readImageFileAsDataUrl(file, 640, 0.82);
+      updateSlideVideo(i, "coverImageUrl", dataUrl);
+    } catch {
+      // A bad image file shouldn't block editing the rest of the slide — just skip it.
+    }
+  }
   function addLink() { update("links", [...draft.links, { label: "", url: "" }]); }
   function updateLink(i, field, value) { update("links", draft.links.map((l, idx) => idx === i ? { ...l, [field]: value } : l)); }
   function removeLink(i) { update("links", draft.links.filter((_, idx) => idx !== i)); }
@@ -3833,18 +3999,112 @@ function EditModal({ draft, setDraft, onCancel, onSave, onDelete }) {
                     <input style={inputStyle} placeholder={"Slide " + (i + 1) + " title"} value={s.title} onChange={e => updateSlide(i, "title", e.target.value)} />
                     <button onClick={() => removeSlide(i)} className="onb-btn" style={{ background: "transparent", border: `1px solid ${BRAND.sandBorder}`, borderRadius: 8, padding: "0 10px", color: "#C0392B" }}><Trash2 size={14} /></button>
                   </div>
-                  <FormattingToolbar
-                    value={s.bullets.join("\n")}
-                    onChange={newValue => updateSlide(i, "bullets", newValue.split("\n"))}
-                    getTextarea={() => slideTextareaRefs.current[s.id]}
-                  />
-                  <textarea
-                    ref={el => { slideTextareaRefs.current[s.id] = el; }}
-                    style={{ ...inputStyle, minHeight: 70, resize: "vertical" }}
-                    placeholder={"One line per paragraph. Start a line with \"- \" for a bullet, or \"1. \" for a numbered list. Leave a line blank for spacing. Supports **bold**, *italic*, `code`, # headings, and [links](https://...)."}
-                    value={s.bullets.join("\n")}
-                    onChange={e => updateSlide(i, "bullets", e.target.value.split("\n"))}
-                  />
+
+                  <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                    {[{ key: "text", label: "Text / Slide" }, { key: "video", label: "Video" }].map(opt => {
+                      const active = getSlideType(s) === opt.key;
+                      return (
+                        <button
+                          key={opt.key} type="button" onClick={() => setSlideType(i, opt.key)} className="onb-btn"
+                          style={{ background: active ? BRAND.darkTeal : BRAND.white, color: active ? BRAND.white : BRAND.teal, border: `1px solid ${active ? BRAND.darkTeal : BRAND.sandBorder}`, borderRadius: 999, padding: "4px 12px", fontSize: 12, fontWeight: 600 }}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {getSlideType(s) === "video" ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div>
+                        <label style={labelStyle}>Video URL (YouTube)</label>
+                        <input
+                          style={inputStyle}
+                          placeholder="https://www.youtube.com/watch?v=…"
+                          value={s.video?.url || ""}
+                          onChange={e => updateSlideVideo(i, "url", e.target.value)}
+                        />
+                        {s.video?.url && !parseYouTubeLessonUrl(s.video.url).ok && (
+                          <p style={{ fontSize: 11.5, color: "#C0392B", margin: "5px 0 0" }}>{parseYouTubeLessonUrl(s.video.url).error}</p>
+                        )}
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Short description (optional)</label>
+                        <textarea
+                          style={{ ...inputStyle, minHeight: 56, resize: "vertical" }}
+                          value={s.video?.description || ""}
+                          onChange={e => updateSlideVideo(i, "description", e.target.value)}
+                          placeholder="One or two sentences introducing the video"
+                        />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Key Takeaways (optional)</label>
+                        <textarea
+                          style={{ ...inputStyle, minHeight: 70, resize: "vertical" }}
+                          value={(s.video?.keyTakeaways || []).join("\n")}
+                          onChange={e => updateSlideVideo(i, "keyTakeaways", e.target.value.split("\n"))}
+                          placeholder={"One line per point — start a line with \"- \" for a bullet."}
+                        />
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Cover image (optional)</label>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                          {s.video?.coverImageUrl ? (
+                            <img src={s.video.coverImageUrl} alt="" style={{ width: 72, height: 40, borderRadius: 6, objectFit: "cover" }} />
+                          ) : (
+                            <div style={{ width: 72, height: 40, borderRadius: 6, background: BRAND.white, border: `1px solid ${BRAND.sandBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                              <ImageIcon size={15} color={BRAND.teal} />
+                            </div>
+                          )}
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label className="onb-btn" style={{ fontSize: 12, color: BRAND.teal, border: `1px solid ${BRAND.sandBorder}`, borderRadius: 6, padding: "5px 10px", background: BRAND.white, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, width: "fit-content" }}>
+                              <ImageIcon size={13} /> {s.video?.coverImageUrl ? "Change cover" : "Upload cover"}
+                              <input type="file" accept="image/*" onChange={e => handleSlideCoverUpload(i, e)} style={{ display: "none" }} />
+                            </label>
+                            {s.video?.coverImageUrl && (
+                              <button onClick={() => updateSlideVideo(i, "coverImageUrl", "")} className="onb-btn" style={{ fontSize: 11.5, color: "#C0392B", background: "transparent", border: "none", padding: 0, textAlign: "left" }}>
+                                Remove cover
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <p style={{ fontSize: 11, color: BRAND.teal, margin: "6px 0 0" }}>Leave blank to use an automatically generated thumbnail.</p>
+                      </div>
+                      <div>
+                        <label style={labelStyle}>Playback mode</label>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {[
+                            { key: "click", label: "Play on click" },
+                            { key: "autoplay-muted", label: "Autoplay muted" },
+                          ].map(opt => (
+                            <label key={opt.key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: BRAND.darkTeal, cursor: "pointer" }}>
+                              <input
+                                type="radio" name={"playback-" + s.id}
+                                checked={(s.video?.playbackMode || "click") === opt.key}
+                                onChange={() => updateSlideVideo(i, "playbackMode", opt.key)}
+                              />
+                              {opt.label}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <FormattingToolbar
+                        value={s.bullets.join("\n")}
+                        onChange={newValue => updateSlide(i, "bullets", newValue.split("\n"))}
+                        getTextarea={() => slideTextareaRefs.current[s.id]}
+                      />
+                      <textarea
+                        ref={el => { slideTextareaRefs.current[s.id] = el; }}
+                        style={{ ...inputStyle, minHeight: 70, resize: "vertical" }}
+                        placeholder={"One line per paragraph. Start a line with \"- \" for a bullet, or \"1. \" for a numbered list. Leave a line blank for spacing. Supports **bold**, *italic*, `code`, # headings, and [links](https://...)."}
+                        value={s.bullets.join("\n")}
+                        onChange={e => updateSlide(i, "bullets", e.target.value.split("\n"))}
+                      />
+                    </>
+                  )}
                 </div>
               ))}
               <button onClick={addSlide} className="onb-btn" style={{ background: "transparent", border: `1px dashed ${BRAND.sandBorder}`, borderRadius: 8, padding: "8px", color: BRAND.teal, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
